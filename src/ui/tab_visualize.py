@@ -49,12 +49,12 @@ def render_visualize_tab() -> None:
     max_nodes = st.slider(
         "Số entity hiển thị tối đa (để render nhanh, không bị lag)",
         min_value=20,
-        max_value=500,
-        value=150,
+        max_value=300,
+        value=80,
         step=10,
         help="Giới hạn số entity FETCH từ MongoDB để render HTML. "
              "Không phải tổng số entity trong DB. "
-             "DB có thể có nhiều hơn — slider này chỉ kiểm soát số node hiển thị.",
+             "Khuyến nghị ≤ 150 để browser mượt; > 200 có thể lag với laptop yếu.",
     )
 
     if st.button("🎨 Render graph HTML"):
