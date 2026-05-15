@@ -28,7 +28,7 @@ from .graph_builder import make_graph_store, make_query_model
 # Giới hạn số entity gửi cho LLM trong RAG prompt — tránh blow context.
 # Tăng lên 80 vì graph dày (CV/audit có 90+ entities). Anchors phải luôn
 # được giữ — xem _sort_for_context() để hiểu thứ tự ưu tiên.
-MAX_ENTITIES_IN_CONTEXT = 80
+MAX_ENTITIES_IN_CONTEXT = 100
 
 
 # Hint chèn trước câu hỏi của user khi gọi RAG — fix lỗi LLM đảo chiều
@@ -46,18 +46,27 @@ _DIRECTION_HINT = (
 )
 
 
+def _centrality(ent: dict) -> int:
+    """Đếm số outgoing relationships — proxy cho 'độ quan trọng' của entity."""
+    rels = ent.get("relationships") or {}
+    if isinstance(rels, dict):
+        return len(rels.get("target_ids", []))
+    return 0
+
+
 def _diversify_truncate(
     entities: list[dict], max_n: int, anchors: list[str]
 ) -> list[dict]:
-    """Cap entities về `max_n`, ưu tiên đa dạng `type` để LLM có context rộng.
+    """Cap entities về `max_n`, hybrid hub + type diversity.
 
-    Vấn đề: nếu chỉ sort theo priority rồi cap đầu list → có thể 80 slot toàn
-    cùng 1 type (vd "Concept"), miss các Organization/Control quan trọng.
+    Vấn đề: graph có thể có 200+ distinct types với 80 slots — pure round-robin
+    không kịp pick các hub entities ở types late.
 
-    Strategy:
-      1. Anchor entities LUÔN giữ (priority cao nhất)
-      2. Non-anchor: round-robin theo type (mỗi type ≥ 1 slot)
-      3. Sau khi mỗi type có 1 entity, fill thêm theo priority cũ
+    Strategy 3-pass:
+      1. Anchor entities LUÔN giữ
+      2. Top 1/3 slots: hub entities by centrality desc — bắt buộc các Provider
+         lớn (Okta, Azure, Snowflake) vào context bất kể type
+      3. Còn lại: round-robin theo type, within-type sort by centrality
     """
     anchor_set = set(anchors)
     anchor_ents = [e for e in entities if e.get("_id", "") in anchor_set]
@@ -68,12 +77,26 @@ def _diversify_truncate(
     if slots <= 0:
         return selected
 
-    # Group non-anchors theo type, giữ thứ tự priority trong mỗi group
-    by_type: dict[str, list[dict]] = {}
-    for e in rest:
-        by_type.setdefault(e.get("type") or "(no_type)", []).append(e)
+    # Pass 2: top hubs by centrality (1/2 remaining slots) — đảm bảo
+    # các Provider/Major actor không bị bỏ rơi vì round-robin không kịp
+    # khi graph có hàng trăm distinct types.
+    rest_sorted = sorted(rest, key=_centrality, reverse=True)
+    hub_quota = max(1, slots // 2)
+    hub_picked = rest_sorted[:hub_quota]
+    hub_ids = {e.get("_id") for e in hub_picked}
+    selected.extend(hub_picked)
+    slots -= len(hub_picked)
+    if slots <= 0:
+        return selected
 
-    # Round-robin pick: mỗi vòng lấy 1 entity / type
+    # Pass 3: round-robin theo type cho slots còn lại, within-type sort by centrality
+    remaining = [e for e in rest if e.get("_id") not in hub_ids]
+    by_type: dict[str, list[dict]] = {}
+    for e in remaining:
+        by_type.setdefault(e.get("type") or "(no_type)", []).append(e)
+    for t in by_type:
+        by_type[t].sort(key=_centrality, reverse=True)
+
     while slots > 0 and any(by_type.values()):
         for tk in list(by_type.keys()):
             if not by_type[tk]:
@@ -188,6 +211,49 @@ class GraphRAGQueryEngine:
 
         return extracted, used_vector
 
+    def _expand_anchors_with_neighbors(
+        self, anchors: list[str], max_extra: int = 8
+    ) -> list[str]:
+        """Mở rộng anchors qua 1 hop graph để bắt thêm entity QUAN TRỌNG.
+
+        Vấn đề: vector search + extract_entity_names ưu tiên entity match
+        keyword câu hỏi (Controls/Concepts), bỏ sót hub entities (Org providers,
+        major actors) thường là câu trả lời cho "ai cung cấp / ai làm X".
+
+        Fix type-agnostic: lấy neighbors qua 1 hop, sort theo `centrality`
+        (số relationships) descending, lấy top N. Hub neighbors thường là
+        các actor/provider chính bất kể domain (audit, CV, contract, medical...).
+
+        Vd:
+          - Audit doc: top hub = Schellman, OpenAI Inc., HITRUST, Azure, Okta
+          - CV: top hub = Pham Tuyen, Veek, AIAIVN
+          - Contract: top hub = Party A, Party B, governing-law entity
+        → Generic cho mọi loại tài liệu.
+        """
+        if not anchors:
+            return anchors
+
+        try:
+            neighbors = self._store.related_entities(anchors)
+        except Exception:
+            return anchors
+
+        seen = set(anchors)
+        scored: list[tuple[int, str]] = []
+        for n in neighbors:
+            nid = n.get("_id")
+            if not nid or nid in seen:
+                continue
+            seen.add(nid)
+            # Centrality = số outgoing relationships của neighbor
+            rels = n.get("relationships") or {}
+            targets = rels.get("target_ids", []) if isinstance(rels, dict) else []
+            scored.append((len(targets), nid))
+
+        # Sort theo centrality desc → hub entities lên đầu
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return anchors + [nid for _, nid in scored[:max_extra]]
+
     def ask(self, question: str) -> QueryResult:
         """Hỏi 1 câu, trả về câu trả lời + entities làm context.
 
@@ -196,6 +262,9 @@ class GraphRAGQueryEngine:
           - Không có → chỉ extract names → traverse (graph-only)
         """
         anchors, used_vector = self._gather_anchor_entities(question)
+        # Multi-hop expansion: bắt thêm Organization providers thường bị
+        # vector search miss khi câu hỏi nói về "ai cung cấp X"
+        anchors = self._expand_anchors_with_neighbors(anchors)
 
         related_ids: list[str] = []
         if anchors:
