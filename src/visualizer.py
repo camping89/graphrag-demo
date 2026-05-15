@@ -80,12 +80,35 @@ def fetch_entities(cfg: Config, limit: int = DEFAULT_MAX_NODES) -> list[Dict[str
         client.close()
 
 
-def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
-    """Convert danh sách entity dict thành networkx DiGraph.
+def _tier_for_degree(degree: int, max_degree: int) -> tuple[int, int]:
+    """Phân tier dựa trên degree relative so với max trong graph hiện tại.
 
-    - Chỉ giữ edges trỏ tới node ĐÃ được fetch (no skeleton nodes)
-    - Set `value` = degree để vis-network scale node size: hub to, leaf nhỏ
-      → tạo visual hierarchy, mắt user định vị được "trung tâm" của graph
+    Trả về (tier_number, size_px). Tier 1 = super-hub, Tier 5 = leaf.
+
+    Dùng tỷ lệ thay vì threshold cố định → adapt theo từng collection
+    (collection nhỏ 100 entities và lớn 3000 entities đều có 5 tier rõ rệt).
+    """
+    if max_degree <= 0:
+        return 5, 12
+    ratio = degree / max_degree
+    if ratio >= 0.50:
+        return 1, 50  # Super-hub — trung tâm của graph
+    if ratio >= 0.20:
+        return 2, 35  # Major hub
+    if ratio >= 0.08:
+        return 3, 25  # Connector
+    if ratio >= 0.03:
+        return 4, 18  # Mid
+    return 5, 12      # Leaf
+
+
+def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
+    """Convert entity dict thành networkx DiGraph với 5 tier size rời rạc.
+
+    - Chỉ giữ edges trỏ tới fetched nodes (no skeleton)
+    - Phân node thành 5 tier theo % degree → size rời rạc (50/35/25/18/12 px)
+      → user nhìn ra ngay "cấp" của entity, không phải gradient mờ ảo
+    - Tooltip kèm tier number + rel count cho hover
     """
     entities = list(entities)
     graph = nx.DiGraph()
@@ -97,7 +120,7 @@ def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
             continue
         fetched_ids.add(node_id)
         etype = entity.get("type", "Entity")
-        graph.add_node(node_id, label=node_id, title=f"Type: {etype}", group=etype)
+        graph.add_node(node_id, label=node_id, group=etype, _etype=etype)
 
     for entity in entities:
         source = str(entity.get("_id", ""))
@@ -107,10 +130,17 @@ def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
             if target and target != source and target in fetched_ids:
                 graph.add_edge(source, target)
 
-    # Set value = total degree → vis-network dùng để scale node size
-    for node_id in graph.nodes:
-        deg = graph.in_degree(node_id) + graph.out_degree(node_id)
-        graph.nodes[node_id]["value"] = max(deg, 1)  # min 1 để vẫn thấy node leaf
+    # Pass 2: tính degree + phân tier (cần biết max_degree trước)
+    degrees = {n: graph.in_degree(n) + graph.out_degree(n) for n in graph.nodes}
+    max_deg = max(degrees.values()) if degrees else 0
+
+    for node_id, deg in degrees.items():
+        tier, size = _tier_for_degree(deg, max_deg)
+        etype = graph.nodes[node_id].pop("_etype", "Entity")
+        graph.nodes[node_id]["size"] = size
+        graph.nodes[node_id]["title"] = (
+            f"Tier {tier} · {deg} relationships\nType: {etype}"
+        )
 
     return graph
 
@@ -151,15 +181,14 @@ def render_html(graph: nx.DiGraph, output_path: Path) -> Path:
         "minVelocity": 0.75
       },
       "nodes": {
+        "shape": "dot",
         "scaling": {
-          "min": 10,
-          "max": 40,
           "label": {
             "enabled": true,
             "min": 10,
             "max": 22,
-            "drawThreshold": 12,
-            "maxVisible": 40
+            "drawThreshold": 16,
+            "maxVisible": 30
           }
         },
         "font": {"size": 12, "strokeWidth": 3, "strokeColor": "#000"}
