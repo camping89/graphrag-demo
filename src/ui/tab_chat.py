@@ -1,4 +1,4 @@
-"""Tab Chat — hỏi đáp với knowledge graph trên active collection."""
+"""Tab Chat — Q&A against the knowledge graph on the active collection."""
 
 from __future__ import annotations
 
@@ -8,29 +8,29 @@ from src.ui.shared import active_collection, get_query_engine
 
 
 def _render_assistant_inline(prompt: str, collection: str) -> dict | None:
-    """Render chat bubble assistant: hiển thị loading → thay bằng câu trả lời.
+    """Render the assistant chat bubble: show loading → replace with answer.
 
-    Trả về dict {content, related, anchors, used_vector} để caller lưu vào history,
-    hoặc None nếu lỗi (đã hiển thị error trong bubble).
+    Returns dict {content, related, anchors, used_vector} for the caller to
+    store in history, or None on error (error already shown in the bubble).
     """
     with st.chat_message("assistant"):
-        # Placeholder loading hiện ngay khi assistant bubble xuất hiện
+        # Loading placeholder shown immediately when the assistant bubble appears
         answer_slot = st.empty()
-        answer_slot.markdown("💭 *Đang xử lý...*")
+        answer_slot.markdown("💭 *Thinking...*")
 
         status_slot = st.empty()
-        with status_slot.status("Đang xử lý", expanded=False) as status:
+        with status_slot.status("Processing", expanded=False) as status:
             try:
-                status.update(label="🔍 Extract entities từ câu hỏi...")
+                status.update(label="🔍 Extracting entities from question...")
                 engine = get_query_engine(collection)
-                status.update(label="🕸️ Duyệt knowledge graph...")
+                status.update(label="🕸️ Traversing knowledge graph...")
                 result = engine.ask(prompt)
             except Exception as exc:  # pragma: no cover
-                status.update(label=f"❌ Lỗi: {exc}", state="error")
-                answer_slot.error(f"Lỗi: {exc}")
+                status.update(label=f"❌ Error: {exc}", state="error")
+                answer_slot.error(f"Error: {exc}")
                 return None
 
-        # Clear status box → chỉ giữ lại câu trả lời
+        # Clear status box → only the answer remains
         status_slot.empty()
         answer_slot.markdown(result.answer)
 
@@ -39,7 +39,7 @@ def _render_assistant_inline(prompt: str, collection: str) -> dict | None:
         st.caption(f"Mode: {mode_badge} · Anchors: {result.anchor_entities or '—'}")
 
         if result.related_entities:
-            with st.expander("🔗 Entities liên quan trong graph"):
+            with st.expander("🔗 Related entities in graph"):
                 st.write(result.related_entities)
 
     return {
@@ -51,22 +51,22 @@ def _render_assistant_inline(prompt: str, collection: str) -> dict | None:
 
 
 def render_chat_tab() -> None:
-    st.subheader("Bước 2 — Hỏi đáp với knowledge graph")
+    st.subheader("Step 2 — Q&A against the knowledge graph")
     st.info(
-        "🎯 **Yêu cầu**: đã build graph (xem tab **1️⃣ Build Graph**) "
-        "hoặc đã có collection sẵn trong MongoDB. "
-        "Chọn collection ở **sidebar** để switch giữa các knowledge base."
+        "🎯 **Requirement**: graph must be built (see tab **1️⃣ Build Graph**) "
+        "or a collection must already exist in MongoDB. "
+        "Pick a collection in the **sidebar** to switch between knowledge bases."
     )
-    with st.expander("💡 Gợi ý dạng câu hỏi"):
+    with st.expander("💡 Sample questions"):
         st.markdown(
-            "- *Tài liệu này nói về chủ đề/hệ thống nào?*\n"
-            "- *Các thực thể chính trong tài liệu là gì?*\n"
-            "- *Mối quan hệ giữa X và Y là gì?*\n"
-            "- *Liệt kê các bên liên quan và vai trò của họ.*"
+            "- *What topic/system is this document about?*\n"
+            "- *What are the main entities in the document?*\n"
+            "- *What is the relationship between X and Y?*\n"
+            "- *List the involved parties and their roles.*"
         )
 
     active = active_collection()
-    st.caption(f"🗄️ Đang hỏi collection: `{active}`")
+    st.caption(f"🗄️ Querying collection: `{active}`")
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
@@ -78,7 +78,7 @@ def render_chat_tab() -> None:
     input_slot = st.container()
 
     with input_slot:
-        prompt = st.chat_input("Nhập câu hỏi của bạn...")
+        prompt = st.chat_input("Type your question...")
 
     # ── Tách thành 2 script run để show câu hỏi NGAY ────────────────────
     # Run 1: prompt vừa submit → append history + set pending → st.rerun()
@@ -96,7 +96,7 @@ def render_chat_tab() -> None:
                 st.markdown(msg["content"])
                 related = msg.get("related") or []
                 if related:
-                    with st.expander("🔗 Entities liên quan trong graph"):
+                    with st.expander("🔗 Related entities in graph"):
                         st.write(related)
 
         # Process pending (chỉ có ở run 2 sau khi user vừa submit)

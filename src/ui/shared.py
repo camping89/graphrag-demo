@@ -1,4 +1,4 @@
-"""Tiện ích dùng chung cho các tab UI: cached resources + helpers."""
+"""Shared utilities for UI tabs: cached resources + helpers."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ def get_config() -> Config:
     return load_config()
 
 
-@st.cache_resource(show_spinner="Đang kết nối MongoDB...")
+@st.cache_resource(show_spinner="Connecting to MongoDB...")
 def get_query_engine(collection_name: str) -> GraphRAGQueryEngine:
-    """Khởi tạo query engine cho 1 collection cụ thể (cache theo tên)."""
+    """Initialize a query engine for a specific collection (cache keyed by name)."""
     base = get_config()
     cfg = dataclasses.replace(base, mongodb_collection=collection_name)
     return GraphRAGQueryEngine(cfg)
@@ -27,7 +27,7 @@ def get_query_engine(collection_name: str) -> GraphRAGQueryEngine:
 
 @st.cache_data(ttl=10, show_spinner=False)
 def list_collections() -> list[str]:
-    """Liệt kê collections trong DB. Cache 10s để tránh hit Mongo liên tục."""
+    """List collections in DB. Cached 10s to avoid hammering Mongo."""
     cfg = get_config()
     client = MongoClient(cfg.mongodb_uri)
     try:
@@ -37,9 +37,9 @@ def list_collections() -> list[str]:
 
 
 def count_entities(collection_name: str) -> int:
-    """Đếm số entity (rows) thật trong collection.
+    """Count actual entities (rows) in a collection.
 
-    Không cache — gọi sau build để show số liệu chính xác ngay tức thì.
+    Not cached — called after build to show accurate numbers immediately.
     """
     cfg = get_config()
     client = MongoClient(cfg.mongodb_uri)
@@ -50,13 +50,13 @@ def count_entities(collection_name: str) -> int:
 
 
 def slugify_collection_name(name: str) -> str:
-    """Chuyển tên thành slug hợp lệ cho MongoDB collection (a-z, 0-9, _)."""
+    """Slugify a name into a valid MongoDB collection name (a-z, 0-9, _)."""
     slug = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip()).strip("_").lower()
     return slug or "default_kg"
 
 
 def active_collection() -> str:
-    """Lấy collection đang active từ session, fallback về default trong config."""
+    """Get the active collection from session, fall back to config default."""
     return st.session_state.get(
         "active_collection", get_config().mongodb_collection
     )

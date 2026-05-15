@@ -1,9 +1,9 @@
-"""Streamlit Web UI cho GraphRAG demo.
+"""Streamlit Web UI for the GraphRAG demo.
 
-Chạy:
+Run:
     streamlit run app.py
 
-Logic được tách thành các module trong src/ui/ để giữ file này ngắn gọn.
+Logic is split into modules under src/ui/ to keep this file short.
 """
 
 from __future__ import annotations
@@ -36,34 +36,34 @@ render_sidebar()
 
 st.title("🕸️ GraphRAG × MongoDB Demo")
 st.caption(
-    "Demo end-to-end: PDF → Knowledge Graph (MongoDB Atlas) → "
-    "Hỏi đáp bằng LLM với context có cấu trúc."
+    "End-to-end demo: PDF → Knowledge Graph (MongoDB Atlas) → "
+    "Q&A via LLM with structured context."
 )
 
-# Workflow guide cho người mới — nhắc thứ tự thao tác đúng
-with st.expander("📖 Workflow cho tài liệu mới (lần đầu dùng)", expanded=False):
+# Workflow guide for first-time users
+with st.expander("📖 Workflow for a new document (first-time use)", expanded=False):
     st.markdown(
         """
-        Với một tài liệu PDF mới, làm theo thứ tự sau:
+        For a new PDF document, follow this order:
 
-        **1️⃣ Build Graph** — Upload PDF và build knowledge graph
-        - Bước này gọi LLM extract entities + relationships → lưu vào MongoDB
-        - Khuyến nghị dùng `Giới hạn số chunk = 20` để test rẻ trước, sau đó build full
-        - Mất vài phút tới vài chục phút tuỳ độ dài PDF
+        **1️⃣ Build Graph** — Upload PDF and build the knowledge graph
+        - This step calls the LLM to extract entities + relationships → stored in MongoDB
+        - Recommended: set `Chunk limit = 20` for a cheap test first, then build full
+        - Takes a few minutes to tens of minutes depending on PDF length
 
-        **2️⃣ Chat** — Hỏi đáp với knowledge graph vừa build
-        - Chọn `Active collection` ở sidebar để switch giữa các knowledge base
-        - LLM sẽ duyệt graph (qua `$graphLookup`) để trả lời
+        **2️⃣ Chat** — Ask questions against the freshly built knowledge graph
+        - Pick `Active collection` in the sidebar to switch between knowledge bases
+        - The LLM traverses the graph (via `$graphLookup`) to answer
 
-        **3️⃣ Visualize** (tuỳ chọn) — Xem đồ thị tri thức trực quan
-        - Render HTML interactive: kéo, zoom, xem entity + relationship
+        **3️⃣ Visualize** (optional) — Interactive view of the knowledge graph
+        - Render an HTML graph: drag, zoom, inspect entities + relationships
 
-        > 💡 **Nếu chỉ muốn hỏi đáp** với collection đã có sẵn trong MongoDB
-        > → bỏ qua bước 1, vào thẳng tab Chat.
+        > 💡 **If you only want to query** an existing collection in MongoDB
+        > → skip step 1 and go straight to the Chat tab.
         """
     )
 
-# Tabs theo thứ tự workflow: Build → Chat → Visualize
+# Tabs in workflow order: Build → Chat → Visualize
 tab_build, tab_chat, tab_graph = st.tabs([
     "1️⃣ Build Graph",
     "2️⃣ Chat",

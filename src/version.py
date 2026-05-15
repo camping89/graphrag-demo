@@ -11,4 +11,4 @@ Format: SemVer-ish — MAJOR.MINOR.PATCH
 
 from __future__ import annotations
 
-__version__ = "0.5.13"
+__version__ = "0.6.0"

@@ -1,4 +1,4 @@
-"""Tab Visualize — render knowledge graph thành HTML interactive."""
+"""Tab Visualize — render the knowledge graph into interactive HTML."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ GRAPH_HTML_PATH = Path("out/graph.html")
 
 
 def _count_entities(cfg, collection_name: str) -> int:
-    """Đếm tổng số entity trong collection — dùng cho UI hint."""
+    """Count total entities in collection — used as a UI hint."""
     client = MongoClient(cfg.mongodb_uri)
     try:
         return client[cfg.mongodb_db][collection_name].estimated_document_count()
@@ -26,11 +26,11 @@ def _count_entities(cfg, collection_name: str) -> int:
 
 
 def render_visualize_tab() -> None:
-    st.subheader("Bước 3 (tuỳ chọn) — Visualize knowledge graph")
+    st.subheader("Step 3 (optional) — Visualize the knowledge graph")
     st.info(
-        "🎯 **Tuỳ chọn**: render đồ thị tri thức ra HTML interactive "
-        "để nhìn trực quan các entity + relationship. "
-        "Cần đã build graph ở **1️⃣ Build Graph** trước."
+        "🎯 **Optional**: render the knowledge graph to an interactive HTML "
+        "to visualize entities + relationships. "
+        "Requires a graph already built in **1️⃣ Build Graph**."
     )
     active = active_collection()
     cfg = get_config()
@@ -41,30 +41,30 @@ def render_visualize_tab() -> None:
 
     if total_in_db is not None:
         st.caption(
-            f"🗄️ Collection: `{active}` — **{total_in_db} entities** trong DB."
+            f"🗄️ Collection: `{active}` — **{total_in_db} entities** in DB."
         )
     else:
-        st.caption(f"🗄️ Đang visualize collection: `{active}`")
+        st.caption(f"🗄️ Visualizing collection: `{active}`")
 
     max_nodes = st.slider(
-        "Số entity hiển thị tối đa (để render nhanh, không bị lag)",
+        "Max entities to display (keep render fast, avoid lag)",
         min_value=20,
         max_value=300,
         value=80,
         step=10,
-        help="Giới hạn số entity FETCH từ MongoDB để render HTML. "
-             "Không phải tổng số entity trong DB. "
-             "Khuyến nghị ≤ 150 để browser mượt; > 200 có thể lag với laptop yếu.",
+        help="Limits how many entities are FETCHED from MongoDB for the HTML "
+             "render. Not the total entity count in DB. "
+             "Recommended ≤ 150 for smooth browser; > 200 may lag on low-spec laptops.",
     )
 
     if st.button("🎨 Render graph HTML"):
         run_cfg = dataclasses.replace(get_config(), mongodb_collection=active)
-        with st.spinner("Đang đọc Mongo và render HTML..."):
+        with st.spinner("Reading from Mongo and rendering HTML..."):
             try:
                 path = visualize_graph(run_cfg, GRAPH_HTML_PATH, max_nodes=max_nodes)
-                st.success(f"Đã render: {path.resolve()}")
+                st.success(f"Rendered: {path.resolve()}")
             except Exception as exc:
-                st.error(f"Render thất bại: {exc}")
+                st.error(f"Render failed: {exc}")
                 return
 
     if GRAPH_HTML_PATH.exists():
@@ -72,4 +72,4 @@ def render_visualize_tab() -> None:
         html = GRAPH_HTML_PATH.read_text(encoding="utf-8")
         components.html(html, height=820, scrolling=True)
     else:
-        st.info("Chưa có file HTML — bấm nút **Render graph HTML** ở trên.")
+        st.info("No HTML yet — click **Render graph HTML** above.")

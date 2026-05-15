@@ -1,4 +1,4 @@
-"""Tab Build — upload PDF, chọn collection, build knowledge graph."""
+"""Tab Build — upload PDF, pick collection, build knowledge graph."""
 
 from __future__ import annotations
 
@@ -36,32 +36,32 @@ from src.ui.shared import (
 
 @st.cache_data(show_spinner=False)
 def _pdf_stats_cached(path_str: str, mtime: float) -> dict:
-    """Cache stats theo (path, mtime) — file mới upload → key mới, recompute."""
+    """Cache stats by (path, mtime) — new uploaded file → new key, recompute."""
     return pdf_stats(Path(path_str))
 
 
 def _choose_pdf_source() -> Path | None:
-    """User upload PDF qua file_uploader. Trả về Path hợp lệ hoặc None.
+    """User uploads PDF via file_uploader. Returns a valid Path or None.
 
-    Sau khi upload → phân tích pages/chars + show đề xuất chunk params
-    với nút "Áp dụng" để pre-fill input bên dưới.
+    After upload → analyze pages/chars + show recommended chunk params
+    with an "Apply" button that pre-fills the inputs below.
     """
-    st.markdown("**📄 Bước 1: Upload PDF**")
+    st.markdown("**📄 Step 1: Upload PDF**")
     uploaded = st.file_uploader(
-        "Chọn file PDF",
+        "Choose PDF file",
         type=["pdf"],
-        help="Upload tài liệu để build knowledge graph. "
-             "Có thể upload nhiều PDF cùng domain (vào cùng collection) để merge entities.",
+        help="Upload a document to build the knowledge graph. "
+             "Multiple PDFs in the same domain can go to the same collection to merge entities.",
     )
     if uploaded is None:
         return None
 
-    # PyPDFLoader yêu cầu path → lưu uploaded file ra temp dir
+    # PyPDFLoader expects a path → save uploaded file to temp dir
     tmp_dir = Path(tempfile.gettempdir()) / "graphrag-uploads"
     tmp_dir.mkdir(exist_ok=True)
     target = tmp_dir / uploaded.name
     target.write_bytes(uploaded.getvalue())
-    st.success(f"✅ Đã upload: {uploaded.name} ({uploaded.size / 1024:.1f} KB)")
+    st.success(f"✅ Uploaded: {uploaded.name} ({uploaded.size / 1024:.1f} KB)")
 
     # Phân tích PDF + show đề xuất
     _render_pdf_analysis(target)
@@ -69,11 +69,11 @@ def _choose_pdf_source() -> Path | None:
 
 
 def _render_pdf_analysis(pdf_path: Path) -> None:
-    """Hiển thị stats PDF + đề xuất chunk params với nút áp dụng."""
+    """Display PDF stats + recommended chunk params with an apply button."""
     try:
         stats = _pdf_stats_cached(str(pdf_path), pdf_path.stat().st_mtime)
     except Exception as exc:
-        st.warning(f"Không phân tích được PDF: {exc}")
+        st.warning(f"Could not analyze PDF: {exc}")
         return
 
     rec = recommend_chunk_params(stats["total_chars"])
@@ -89,25 +89,26 @@ def _render_pdf_analysis(pdf_path: Path) -> None:
 
     col_rec, col_btn = st.columns([3, 1], vertical_alignment="center")
     col_rec.info(
-        f"💡 **Đề xuất**: `chunk_size={rec['chunk_size']}`, "
+        f"💡 **Recommended**: `chunk_size={rec['chunk_size']}`, "
         f"`overlap={rec['overlap']}` → ~**{rec['est_chunks']} chunks**. "
         f"{rec['reason']}"
     )
     col_btn.button(
-        "✨ Áp dụng đề xuất",
+        "✨ Apply recommendation",
         on_click=_apply_recommendation,
-        help="Pre-fill Bước 3 với chunk_size + overlap đề xuất.",
+        help="Pre-fill Step 3 with the recommended chunk_size + overlap.",
         use_container_width=True,
     )
 
 
 def _choose_collection(base_cfg, pdf_path: Path | None) -> str:
-    """UI chọn/nhập collection name, trả về slug đã chuẩn hoá.
+    """UI to pick/enter a collection name, returns the slugified name.
 
-    Khi tạo collection mới + đã upload file → có nút "Suggest từ tên file"
-    để pre-fill ô input với tên file đã slugify (VD: PhamTuyen_CV.pdf → pham_tuyen_cv).
+    When creating a new collection and a file is already uploaded → a
+    "Suggest from filename" button pre-fills the input with the slugified
+    filename (e.g. PhamTuyen_CV.pdf → pham_tuyen_cv).
     """
-    st.markdown("**🗄️ Bước 2: Chọn knowledge base (collection)**")
+    st.markdown("**🗄️ Step 2: Pick knowledge base (collection)**")
     existing = []
     try:
         existing = list_collections()
@@ -116,7 +117,7 @@ def _choose_collection(base_cfg, pdf_path: Path | None) -> str:
 
     mode = st.radio(
         "Mode:",
-        ["Merge vào collection có sẵn", "Tạo collection mới"],
+        ["Merge into existing collection", "Create new collection"],
         horizontal=True,
     )
 
@@ -124,7 +125,7 @@ def _choose_collection(base_cfg, pdf_path: Path | None) -> str:
         options = sorted(set(existing) | {base_cfg.mongodb_collection})
         default_idx = options.index(base_cfg.mongodb_collection) \
             if base_cfg.mongodb_collection in options else 0
-        return st.selectbox("Collection có sẵn", options=options, index=default_idx)
+        return st.selectbox("Existing collection", options=options, index=default_idx)
 
     # --- Tạo collection mới: text input + nút Suggest ---
     def _apply_suggestion():
@@ -139,18 +140,18 @@ def _choose_collection(base_cfg, pdf_path: Path | None) -> str:
     if "new_collection_input" not in st.session_state:
         st.session_state["new_collection_input"] = base_cfg.mongodb_collection
 
-    # vertical_alignment="bottom" → button căn với đáy input (không lệch label)
+    # vertical_alignment="bottom" → button aligns with input bottom (not label)
     col_input, col_btn = st.columns([3, 1], vertical_alignment="bottom")
     raw_name = col_input.text_input(
-        "Tên collection mới",
+        "New collection name",
         key="new_collection_input",
-        help="Sẽ được chuẩn hoá thành slug a-z/0-9/_.",
+        help="Will be slugified to a-z/0-9/_.",
     )
     col_btn.button(
-        "💡 Suggest từ tên file",
+        "💡 Suggest from filename",
         on_click=_apply_suggestion,
         disabled=pdf_path is None,
-        help="Pre-fill ô bên trái bằng tên file PDF (đã slugify).",
+        help="Pre-fill the left input with the slugified PDF filename.",
         use_container_width=True,
     )
 
@@ -160,12 +161,12 @@ def _choose_collection(base_cfg, pdf_path: Path | None) -> str:
 
 
 def _chunk_params() -> tuple[int, int, int, int]:
-    """UI tham số chunking — trả về (chunk_size, overlap, limit_chunks, max_workers).
+    """UI for chunking params — returns (chunk_size, overlap, limit_chunks, max_workers).
 
-    Dùng `key=` để nút "Áp dụng đề xuất" có thể ghi session_state pre-fill.
+    Uses `key=` so the "Apply recommendation" button can write to session_state.
     """
-    st.markdown("**⚙️ Bước 3: Tham số chunk**")
-    # Khởi tạo default 1 lần — sau đó user/button update qua session_state
+    st.markdown("**⚙️ Step 3: Chunk parameters**")
+    # Initialize defaults once — user/button updates via session_state thereafter
     st.session_state.setdefault("chunk_size_input", 1500)
     st.session_state.setdefault("chunk_overlap_input", 200)
 
@@ -179,29 +180,30 @@ def _chunk_params() -> tuple[int, int, int, int]:
 
     col3, col4 = st.columns(2)
     limit = col3.number_input(
-        "Giới hạn số chunk (0 = full PDF)",
+        "Chunk limit (0 = full PDF)",
         min_value=0, max_value=10000, value=20, step=5,
-        help="Đặt giá trị nhỏ để test rẻ. Đặt 0 để chạy full.",
+        help="Use a small number for a cheap test. Set 0 to process all.",
     )
     max_workers = col4.number_input(
         "Parallel workers",
         min_value=1, max_value=20, value=DEFAULT_MAX_WORKERS, step=1,
-        help="Số chunk extract song song. Cao = nhanh hơn nhiều nhưng dễ hit "
-             "OpenAI rate limit. 5-10 thường tối ưu. 1 = tuần tự (debug).",
+        help="Chunks extracted in parallel. Higher = much faster but more "
+             "likely to hit OpenAI rate limits. 5-10 is usually optimal. "
+             "1 = sequential (debug).",
     )
     return int(chunk_size), int(chunk_overlap), int(limit), int(max_workers)
 
 
 def render_build_tab() -> None:
-    st.subheader("Bước 1 — Build knowledge graph từ PDF")
+    st.subheader("Step 1 — Build knowledge graph from PDF")
     st.info(
-        "🎯 **Đây là bước đầu tiên với mọi tài liệu mới.** "
-        "Sau khi build xong → sang tab **2️⃣ Chat** để hỏi đáp."
+        "🎯 **First step for any new document.** "
+        "Once build is done → switch to tab **2️⃣ Chat** to query."
     )
 
     st.warning(
-        "Thao tác này sẽ gọi LLM cho từng chunk → có thể mất vài phút và "
-        "tốn API credits. Mỗi lần build sẽ **merge** entities vào collection."
+        "This calls the LLM per chunk → may take several minutes and "
+        "consume API credits. Each build **merges** entities into the collection."
     )
 
     base_cfg = get_config()
@@ -224,10 +226,10 @@ def render_build_tab() -> None:
     last_error = st.session_state.pop("last_build_error", None)
     if last_error:
         result_slot.error(
-            f"❌ **Build thất bại**\n\n"
-            f"**Lỗi:** `{last_error['type']}: {last_error['message']}`\n\n"
-            f"**Khi nào:** sau {last_error['elapsed']:.1f}s từ khi bấm Build.\n\n"
-            f"**Traceback (dán cho dev):**\n```\n{last_error['traceback']}\n```"
+            f"❌ **Build failed**\n\n"
+            f"**Error:** `{last_error['type']}: {last_error['message']}`\n\n"
+            f"**When:** {last_error['elapsed']:.1f}s after clicking Build.\n\n"
+            f"**Traceback (paste to dev):**\n```\n{last_error['traceback']}\n```"
         )
     else:
         last = st.session_state.pop("last_build_result", None)
@@ -237,18 +239,18 @@ def render_build_tab() -> None:
     if clicked:
         # Thay button bằng phiên bản disabled trước khi vào build loop
         button_slot.button(
-            "⏳ Đang build...",
+            "⏳ Building...",
             type="primary",
             disabled=True,
             key="build_btn_disabled",
         )
         run_cfg = dataclasses.replace(base_cfg, mongodb_collection=collection_name)
 
-        with st.spinner(f"Load + analyze PDF: {pdf_path.name}"):
+        with st.spinner(f"Loading + analyzing PDF: {pdf_path.name}"):
             chunks, doc_ctx = load_pdf_chunks_with_context(
                 pdf_path, run_cfg, chunk_size, chunk_overlap
             )
-            st.info(f"Đã load {len(chunks)} chunks.")
+            st.info(f"Loaded {len(chunks)} chunks.")
 
             subjects_md = ", ".join(f"`{s}`" for s in doc_ctx.subjects) or "—"
             top_sections = [s.title for s in doc_ctx.sections if s.level == 1][:10]
@@ -264,26 +266,26 @@ def render_build_tab() -> None:
                 f"({len(top_sections)} top-level): {sections_md}"
             )
 
-            # Cho user xem prefix mẫu để verify chất lượng injection
-            with st.expander("🔍 Xem prefix sẽ inject vào chunks"):
+            # Preview the prefix injected into chunks for sanity check
+            with st.expander("🔍 Preview prefix injected into chunks"):
                 sample_section = doc_ctx.sections[0] if doc_ctx.sections else None
                 st.code(doc_ctx.to_chunk_prefix(sample_section), language="text")
 
             if limit_chunks > 0:
                 chunks = chunks[:limit_chunks]
-                st.info(f"Giới hạn xuống {len(chunks)} chunks (test mode).")
+                st.info(f"Limited to {len(chunks)} chunks (test mode).")
 
         start = time.time()
         status_box = st.empty()
-        error_box = st.empty()  # live last-error box (cập nhật khi 1 chunk fail)
-        progress_bar = st.progress(0, text="Khởi tạo...")
+        error_box = st.empty()  # live last-error box (updates on each chunk fail)
+        progress_bar = st.progress(0, text="Initializing...")
         total = len(chunks)
 
         # Lưu fail count + last error để hiển thị live
         live_state = {"failed": 0, "last_error": "", "last_idx": 0}
 
         def on_progress(done: int, total: int) -> None:
-            """Update progress bar + ETA dựa trên tốc độ trung bình hiện tại."""
+            """Update progress bar + ETA based on current average speed."""
             pct = done / total
             elapsed = time.time() - start
             avg_per_chunk = elapsed / done
@@ -301,7 +303,7 @@ def render_build_tab() -> None:
             )
 
         status_box.info(
-            f"Đang extract entities ({max_workers} workers song song) → "
+            f"Extracting entities ({max_workers} parallel workers) → "
             f"`{run_cfg.mongodb_db}.{collection_name}`..."
         )
 
@@ -309,20 +311,21 @@ def render_build_tab() -> None:
             live_state["failed"] = failed
 
         def on_error(idx: int, err_msg: str) -> None:
-            """Cập nhật error_box LIVE khi 1 chunk fail (sau retries)."""
+            """Update error_box LIVE when a chunk fails (after retries)."""
             live_state["last_idx"] = idx
             live_state["last_error"] = err_msg
             # Hiển thị error rõ + gợi ý — fail rate cao => model/rate issue
             fail_rate_hint = ""
             if live_state["failed"] >= 3:
                 fail_rate_hint = (
-                    "\n\n🚨 **Nhiều chunks đang fail liên tục.** Khả năng: "
-                    "OpenAI rate limit (gpt-5 TPM thấp) HOẶC model không "
-                    "tồn tại. **Khuyến nghị**: kill Streamlit (Ctrl+C terminal), "
-                    "set `OPENAI_CHAT_MODEL=gpt-4o` trong `.env`, build lại."
+                    "\n\n🚨 **Many chunks failing in a row.** Likely cause: "
+                    "OpenAI rate limit (low TPM for gpt-5) OR the model "
+                    "doesn't exist. **Recommendation**: kill Streamlit "
+                    "(Ctrl+C in terminal), set `OPENAI_CHAT_MODEL=gpt-4o` "
+                    "in `.env`, build again."
                 )
             error_box.error(
-                f"⚠️ **{live_state['failed']} chunks failed** (sau {MAX_RETRIES} retries).\n\n"
+                f"⚠️ **{live_state['failed']} chunks failed** (after {MAX_RETRIES} retries).\n\n"
                 f"**Chunk #{idx}** error:\n```\n{err_msg}\n```"
                 + fail_rate_hint
             )
@@ -374,8 +377,8 @@ def render_build_tab() -> None:
                 if plans:
                     norm_result = apply_merge_plans(run_cfg, collection_name, plans)
         except Exception as exc:
-            # Không fail build vì normalize lỗi — chỉ log
-            print(f"[auto-normalize] skip do lỗi: {exc}")
+            # Don't fail the build because of normalize errors — just log
+            print(f"[auto-normalize] skipped due to error: {exc}")
 
         # Đếm entities thật trong collection sau build + normalize.
         try:
@@ -406,13 +409,13 @@ def render_build_tab() -> None:
 
 
 def _render_build_result(slot, last: dict) -> None:
-    """Render success/warning ngay dưới button Build.
+    """Render success/warning right below the Build button.
 
-    Hiển thị rõ:
-      - Số chunks đã process
-      - Số entities thực tế trong collection (sau dedup upsert)
-      - Tỷ lệ chunk fail (nếu có) + gợi ý fix
-      - Giải thích vì sao entities có thể ít hơn chunks (dedup)
+    Shows:
+      - Chunks processed
+      - Actual entities in the collection (post dedup-upsert)
+      - Failure rate (if any) + fix hints
+      - Note explaining why entities may be fewer than chunks (dedup)
     """
     total = last["total"]
     failed = last.get("failed", 0)
@@ -423,57 +426,57 @@ def _render_build_result(slot, last: dict) -> None:
     deleted_dupes = last.get("deleted_dupes", 0)
 
     entity_line = (
-        f"- **Entities trong collection** (sau dedup): **{entities}**\n"
+        f"- **Entities in collection** (post-dedup): **{entities}**\n"
         if entities >= 0 else ""
     )
     norm_line = (
-        f"- **Auto-normalize**: merge {merged_groups} groups, "
-        f"xoá {deleted_dupes} duplicate entities\n"
+        f"- **Auto-normalize**: merged {merged_groups} groups, "
+        f"deleted {deleted_dupes} duplicate entities\n"
         if merged_groups > 0 else ""
     )
     dedup_hint = (
-        "\n\n💡 *Lưu ý*: số entities < số chunks là **bình thường** — "
-        "MongoDBGraphStore upsert theo tên entity, nên các entity trùng tên "
-        "trong nhiều chunks sẽ **merge** thành 1 row."
+        "\n\n💡 *Note*: fewer entities than chunks is **normal** — "
+        "MongoDBGraphStore upserts by entity name, so entities with the "
+        "same name across multiple chunks are **merged** into one row."
     )
 
     if failed > 0:
         slot.warning(
-            f"⚠️ **Build xong nhưng có lỗi.** {failed}/{total} chunks **thất bại** "
-            f"sau retries (rate limit/timeout).\n\n"
+            f"⚠️ **Build finished with errors.** {failed}/{total} chunks **failed** "
+            f"after retries (rate limit/timeout).\n\n"
             f"- Chunks processed: {total - failed}/{total}\n"
             f"{entity_line}"
             f"{norm_line}"
-            f"- Thời gian: {elapsed:.1f}s\n"
+            f"- Elapsed: {elapsed:.1f}s\n"
             f"- Collection: {coll}\n\n"
-            f"👉 **Khuyến nghị**: giảm `Parallel workers` xuống 3 và build lại "
-            f"để bù chunks fail (chỉ merge thêm vào, không trùng)."
+            f"👉 **Recommendation**: lower `Parallel workers` to 3 and build again "
+            f"to backfill failed chunks (only merges in, no duplicates)."
             + dedup_hint
         )
     else:
         slot.success(
-            f"✅ **Build xong!**\n\n"
+            f"✅ **Build complete!**\n\n"
             f"- Chunks processed: **{total}**\n"
             f"{entity_line}"
             f"{norm_line}"
-            f"- Thời gian: {elapsed:.1f}s\n"
+            f"- Elapsed: {elapsed:.1f}s\n"
             f"- Collection: {coll}\n\n"
-            f"👉 Sang tab **2️⃣ Chat** để hỏi đáp."
+            f"👉 Switch to tab **2️⃣ Chat** to query."
             + dedup_hint
         )
 
 
 def _render_embeddings_section(base_cfg) -> None:
-    """UI để compute vector embeddings + tạo Atlas Vector Search index.
+    """UI to compute vector embeddings + create the Atlas Vector Search index.
 
-    Tách thành function riêng để giữ render_build_tab() ngắn gọn.
-    Bước này biến collection từ "graph-only" → "hybrid vector + graph".
+    Extracted into its own function to keep render_build_tab() concise.
+    This step upgrades the collection from "graph-only" → "hybrid vector + graph".
     """
-    st.subheader("🧬 Hybrid Vector + Graph (tuỳ chọn)")
+    st.subheader("🧬 Hybrid Vector + Graph (optional)")
     st.markdown(
-        "Sau khi build graph, **compute embeddings** để hỏi đáp bằng câu "
-        "tự nhiên — không cần khớp chính xác tên entity trong graph. "
-        "Bước này gọi OpenAI embedding API cho từng entity (rẻ — ~$0.0001/entity)."
+        "After building the graph, **compute embeddings** to query with natural "
+        "language — no need to match the exact entity name in the graph. "
+        "This calls the OpenAI embedding API per entity (cheap — ~$0.0001/entity)."
     )
 
     try:
@@ -487,23 +490,23 @@ def _render_embeddings_section(base_cfg) -> None:
         else 0
     )
     target_coll = st.selectbox(
-        "Collection cần compute embeddings",
+        "Collection to compute embeddings for",
         options=options,
         index=default_idx,
         key="embed_target_collection",
     )
     force = st.checkbox(
-        "Re-compute ngay cả entity đã có embedding (force refresh)",
+        "Re-compute even for entities that already have embeddings (force refresh)",
         value=False,
     )
 
     last_embed = st.session_state.pop("last_embed_result", None)
     if last_embed:
         st.success(
-            f"✅ Đã embed **{last_embed['count']} entities** trong "
+            f"✅ Embedded **{last_embed['count']} entities** in "
             f"`{last_embed['collection']}` ({last_embed['elapsed']:.1f}s). "
             f"Vector index: `{last_embed['index']}`. "
-            f"Giờ hỏi đáp đã có hybrid mode!"
+            f"Hybrid mode is now active for Chat!"
         )
 
     btn_slot = st.empty()
@@ -512,14 +515,14 @@ def _render_embeddings_section(base_cfg) -> None:
         return
 
     btn_slot.button(
-        "⏳ Đang build embeddings...",
+        "⏳ Building embeddings...",
         disabled=True,
         key="embed_btn_disabled",
     )
 
     run_cfg = dataclasses.replace(base_cfg, mongodb_collection=target_coll)
     start = time.time()
-    progress = st.progress(0, text="Khởi tạo embedding model...")
+    progress = st.progress(0, text="Initializing embedding model...")
 
     def on_progress(done: int, total: int) -> None:
         pct = done / total
@@ -531,7 +534,7 @@ def _render_embeddings_section(base_cfg) -> None:
         )
 
     try:
-        with st.spinner("Đảm bảo Atlas Vector Search index tồn tại..."):
+        with st.spinner("Ensuring Atlas Vector Search index exists..."):
             index_name = ensure_vector_index(run_cfg, target_coll)
         count = backfill_embeddings(
             run_cfg, target_coll, progress_callback=on_progress, force=force
