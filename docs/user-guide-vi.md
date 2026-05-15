@@ -15,7 +15,7 @@ Khác biệt với chatbot thông thường:
 
 ## 2. Truy cập
 
-URL chính: `https://[tên-app].streamlit.app`
+URL chính: `https://eve-graphrag-demo.streamlit.app/`
 
 **Deep links** (mở thẳng tab cụ thể):
 | URL               | Mở tab                     |
