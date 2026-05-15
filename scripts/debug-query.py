@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-COLLECTION = sys.argv[1] if len(sys.argv) > 1 else "soc2_entities"
+COLLECTION = sys.argv[1] if len(sys.argv) > 1 else "openai_2025_soc_2_type_2_report"
 SEARCH_REGEX = sys.argv[2] if len(sys.argv) > 2 else "Veek"
 
 client = MongoClient(os.environ["MONGODB_URI"])

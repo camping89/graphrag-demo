@@ -31,6 +31,21 @@ from .graph_builder import make_graph_store, make_query_model
 MAX_ENTITIES_IN_CONTEXT = 80
 
 
+# Hint chèn trước câu hỏi của user khi gọi RAG — fix lỗi LLM đảo chiều
+# quan hệ trong context SOC 2/audit. Vd: `Service --provided_by--> Okta`
+# có nghĩa Okta CUNG CẤP service, KHÔNG phải service cung cấp Okta.
+# Đây là pattern thường gặp với subservice orgs (Azure, Snowflake, Okta).
+_DIRECTION_HINT = (
+    "IMPORTANT — When interpreting relationships, follow edge DIRECTION strictly. "
+    "Example: `A --provided_by--> B` means B provides to A (NOT A provides to B). "
+    "Subservice Organizations (Azure, Snowflake, Okta, WorkOS, etc.) are "
+    "EXTERNAL providers to OpenAI, NOT internal services of OpenAI. "
+    "When asked 'who provides X', identify the entity at the destination of "
+    "`provided_by` / `provides_service_to` / `hosts` edges.\n\n"
+    "User question: "
+)
+
+
 def _diversify_truncate(
     entities: list[dict], max_n: int, anchors: list[str]
 ) -> list[dict]:
@@ -238,7 +253,7 @@ class GraphRAGQueryEngine:
         chain = rag_prompt | self._store.entity_extraction_model
         return chain.invoke(
             dict(
-                query=question,
+                query=_DIRECTION_HINT + question,
                 related_entities=cleaned,
                 entity_schema=self._store.entity_schema,
             )

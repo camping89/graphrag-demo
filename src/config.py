@@ -75,7 +75,7 @@ def load_config() -> Config:
     return Config(
         mongodb_uri=_require("MONGODB_URI"),
         mongodb_db=os.getenv("MONGODB_DB", "graphrag_demo"),
-        mongodb_collection=os.getenv("MONGODB_COLLECTION", "soc2_entities"),
+        mongodb_collection=os.getenv("MONGODB_COLLECTION", "openai_2025_soc_2_type_2_report"),
         openai_api_key=_require("OPENAI_API_KEY"),
         extraction_model=extraction,
         query_model=query,
