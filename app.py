@@ -63,18 +63,39 @@ with st.expander("📖 Workflow for a new document (first-time use)", expanded=F
         """
     )
 
-# Tabs in workflow order: Build → Chat → Visualize
-tab_build, tab_chat, tab_graph = st.tabs([
-    "1️⃣ Build Graph",
-    "2️⃣ Chat",
-    "3️⃣ Visualize",
-])
+# URL-routed tab navigation — supports deep links like ?tab=chat
+# st.tabs doesn't allow programmatic selection, so we use st.radio bound
+# to st.query_params for shareable URLs (e.g. when sending demo links).
+TABS = {
+    "build": "1️⃣ Build Graph",
+    "chat": "2️⃣ Chat",
+    "visualize": "3️⃣ Visualize",
+}
+_tab_keys = list(TABS.keys())
 
-with tab_build:
+_qp_tab = st.query_params.get("tab", "build")
+if _qp_tab not in TABS:
+    _qp_tab = "build"
+
+current_tab = st.radio(
+    "Workflow",
+    options=_tab_keys,
+    format_func=lambda k: TABS[k],
+    horizontal=True,
+    index=_tab_keys.index(_qp_tab),
+    label_visibility="collapsed",
+    key="active_tab",
+)
+
+# Sync selection back to URL — user can copy/share the link
+if st.query_params.get("tab") != current_tab:
+    st.query_params["tab"] = current_tab
+
+st.markdown("---")
+
+if current_tab == "build":
     render_build_tab()
-
-with tab_chat:
+elif current_tab == "chat":
     render_chat_tab()
-
-with tab_graph:
+else:
     render_visualize_tab()
