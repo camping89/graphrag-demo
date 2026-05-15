@@ -28,7 +28,16 @@ from .entity_embedder import VECTOR_INDEX_NAME, vector_search_entities
 from .graph_builder import make_extraction_model, make_graph_store, make_query_model
 
 
-_AGGREGATION_DETECT_PROMPT = """Determine if the question asks to COUNT or ENUMERATE entities by category/type in a knowledge graph.
+_AGGREGATION_DETECT_PROMPT = """Determine if the question asks to COUNT or ENUMERATE entities by category/type in a knowledge graph. Works for any language — translate intent if needed.
+
+Examples:
+- "How many Controls are there?" → {{"is_count": true, "category": "Control"}}
+- "List all subservice organizations" → {{"is_count": true, "category": "subservice organization"}}
+- "Name every Control Objective" → {{"is_count": true, "category": "Control Objective"}}
+- "What types of policies exist?" → {{"is_count": true, "category": "Policy"}}
+- "Who audited the report?" → {{"is_count": false, "category": null}}
+- "What is CC6.1?" → {{"is_count": false, "category": null}}
+- "Explain MFA" → {{"is_count": false, "category": null}}
 
 Return ONLY valid JSON with keys "is_count" (bool) and "category" (string or null). No prose, no markdown fence.
 
@@ -339,17 +348,25 @@ class GraphRAGQueryEngine:
         category = self._detect_aggregation_category(question)
         if category:
             try:
-                # Search cả type field và _id field — coverage rộng hơn
                 regex = re.escape(category)
-                matching = list(
+                # Pass 1: thử match `type` field — strict, ưu tiên.
+                type_matches = list(
                     self._store.collection.find(
-                        {"$or": [
-                            {"type": {"$regex": regex, "$options": "i"}},
-                            {"_id": {"$regex": regex, "$options": "i"}},
-                        ]},
+                        {"type": {"$regex": regex, "$options": "i"}},
                         {"_id": 1, "type": 1},
                     ).limit(200)
                 )
+                # Pass 2: fallback match `_id` chỉ KHI không có type match —
+                # case user hỏi về identifier pattern (vd "CC6.x", "P6.x").
+                if type_matches:
+                    matching = type_matches
+                else:
+                    matching = list(
+                        self._store.collection.find(
+                            {"_id": {"$regex": regex, "$options": "i"}},
+                            {"_id": 1, "type": 1},
+                        ).limit(200)
+                    )
             except Exception:
                 matching = []
             if matching:
