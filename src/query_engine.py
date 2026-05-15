@@ -15,14 +15,24 @@ Hỗ trợ 2 mode:
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Optional
 
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_mongodb.graphrag.graph import MongoDBGraphStore
 
 from .config import Config
 from .entity_embedder import VECTOR_INDEX_NAME, vector_search_entities
-from .graph_builder import make_graph_store, make_query_model
+from .graph_builder import make_extraction_model, make_graph_store, make_query_model
+
+
+_AGGREGATION_DETECT_PROMPT = """Determine if the question asks to COUNT or ENUMERATE entities by category/type in a knowledge graph.
+
+Return ONLY valid JSON with keys "is_count" (bool) and "category" (string or null). No prose, no markdown fence.
+
+Question: {question}"""
 
 
 # Giới hạn số entity gửi cho LLM trong RAG prompt — tránh blow context.
@@ -295,6 +305,68 @@ class GraphRAGQueryEngine:
             used_vector_search=used_vector,
         )
 
+    def _detect_aggregation_category(self, question: str) -> Optional[str]:
+        """LLM-based detect câu hỏi đếm/liệt kê → trả category, None nếu không.
+
+        Dùng extraction_model (gpt-5-mini) thay query_model để tiết kiệm cost.
+        Language-agnostic: hiểu mọi phrasing thay vì regex hard-code.
+        """
+        try:
+            prompt = ChatPromptTemplate.from_template(_AGGREGATION_DETECT_PROMPT)
+            detector = make_extraction_model(self._cfg)
+            result = (prompt | detector).invoke({"question": question})
+            text = getattr(result, "content", str(result)).strip()
+            # Strip markdown fence nếu LLM trả ```json ... ```
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            data = json.loads(text)
+            if data.get("is_count") and data.get("category"):
+                cat = str(data["category"]).strip()
+                if len(cat) >= 3:
+                    return cat
+        except Exception:
+            pass
+        return None
+
+    def _enrich_query(self, question: str) -> str:
+        """Augment query với direction hint + aggregation data (nếu có).
+
+        Đối với counting/listing question: fetch ALL entities matching type
+        từ MongoDB trực tiếp (không qua vector/graph) → inject vào prompt
+        để LLM trả lời số chính xác. Fix RAG counting weakness.
+        """
+        prefix = _DIRECTION_HINT
+        category = self._detect_aggregation_category(question)
+        if category:
+            try:
+                # Search cả type field và _id field — coverage rộng hơn
+                regex = re.escape(category)
+                matching = list(
+                    self._store.collection.find(
+                        {"$or": [
+                            {"type": {"$regex": regex, "$options": "i"}},
+                            {"_id": {"$regex": regex, "$options": "i"}},
+                        ]},
+                        {"_id": 1, "type": 1},
+                    ).limit(200)
+                )
+            except Exception:
+                matching = []
+            if matching:
+                listing = "\n".join(
+                    f"  {i + 1}. {m['_id']} (type: {m.get('type', '?')})"
+                    for i, m in enumerate(matching)
+                )
+                prefix += (
+                    f"AGGREGATION CONTEXT — direct database enumeration:\n"
+                    f"Exactly {len(matching)} entities match '{category}' "
+                    f"in the knowledge graph:\n{listing}\n\n"
+                    f"Use this exact count/list when answering. "
+                    f"Do NOT rely on context entities below for counting "
+                    f"(they are filtered for relevance, not completeness).\n\n"
+                )
+        return prefix + question
+
     def _chat_with_custom_anchors(self, question: str, anchors: list[str]):
         """Gọi RAG prompt với context lấy từ anchors do hybrid retrieval cung cấp.
 
@@ -322,7 +394,7 @@ class GraphRAGQueryEngine:
         chain = rag_prompt | self._store.entity_extraction_model
         return chain.invoke(
             dict(
-                query=_DIRECTION_HINT + question,
+                query=self._enrich_query(question),
                 related_entities=cleaned,
                 entity_schema=self._store.entity_schema,
             )
