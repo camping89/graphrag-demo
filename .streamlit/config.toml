@@ -1,0 +1,17 @@
+# Streamlit configuration for the deployed demo.
+#
+# toolbarMode = "viewer"  → hide dev tools (Clear Cache, Rerun, etc.) from
+# end users. Prevents the "Clear caches" dialog popping up when the user
+# accidentally hits the `C` keyboard shortcut outside an input field.
+#
+# Other valid values:
+#   "auto" (default) — show full dev toolbar
+#   "developer"      — always show dev tools
+#   "viewer"         — only "Settings" + "Print"
+#   "minimal"        — hide everything
+
+[client]
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false

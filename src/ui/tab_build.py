@@ -181,8 +181,9 @@ def _chunk_params() -> tuple[int, int, int, int]:
     col3, col4 = st.columns(2)
     limit = col3.number_input(
         "Chunk limit (0 = full PDF)",
-        min_value=0, max_value=10000, value=20, step=5,
-        help="Use a small number for a cheap test. Set 0 to process all.",
+        min_value=0, max_value=10000, value=0, step=5,
+        help="Default 0 = process the entire PDF. "
+             "Set a small number (e.g. 20) for a cheap test build first.",
     )
     max_workers = col4.number_input(
         "Parallel workers",

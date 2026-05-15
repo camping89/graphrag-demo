@@ -49,7 +49,8 @@ with st.expander("📖 Workflow for a new document (first-time use)", expanded=F
         **1️⃣ Build Graph** — Upload PDF and build the knowledge graph
         - Upload PDF → app auto-analyzes pages/chars + recommends chunk params
         - Pick or create a `collection` (one knowledge base per topic/document set)
-        - Recommended: set `Chunk limit = 20` for a cheap test first, then build full
+        - Default `Chunk limit = 0` processes the full PDF. Set to a small
+          number (e.g. 20) for a cheap test build first if cost is a concern
         - LLM extracts entities + relationships per chunk → stored in MongoDB
         - **Auto-normalize** runs after build: merges duplicate entities (e.g.
           `Information Security Policy` ≡ `information security policy`)
