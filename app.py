@@ -8,7 +8,21 @@ Logic được tách thành các module trong src/ui/ để giữ file này ng�
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
+
+# Sync Streamlit secrets sang env vars — Streamlit Cloud lưu secrets trong
+# st.secrets (TOML), không tự inject thành env vars. load_config() đọc
+# qua os.getenv() nên cần đoạn này để work cả local (.env) lẫn cloud.
+# Local dev có .env → st.secrets rỗng → no-op. Cloud có st.secrets → populate.
+try:
+    for _key, _val in st.secrets.items():
+        if isinstance(_val, str):
+            os.environ.setdefault(_key, _val)
+except (FileNotFoundError, Exception):
+    pass  # Local dev không có secrets.toml — bỏ qua
+
 
 from src.ui.sidebar import render_sidebar
 from src.ui.tab_build import render_build_tab
