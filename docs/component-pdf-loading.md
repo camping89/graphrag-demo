@@ -1,8 +1,8 @@
 # Component: PDF Loading & Chunking
 
-> File: `src/pdf_loader.py` (120 lines)
+> File: `src/pdf_loader.py` (~172 lines)
 > Vai trò: Đọc PDF, cắt thành chunks vừa với context window LLM, đính kèm
-> document context để extraction chất lượng cao.
+> document context. Đề xuất chunk params theo kích thước tài liệu.
 
 ## 🎯 Mục đích
 
@@ -29,7 +29,43 @@ Tuple[List[Document], DocumentContext]
 - `List[Document]`: chunks đã được prepend context prefix, metadata phong phú
 - `DocumentContext`: metadata cấp tài liệu (subjects, sections, type)
 
-## 🔌 2 hàm public
+## 🔌 4 hàm public
+
+### `pdf_stats(pdf_path) -> dict`
+
+Đếm pages + tổng chars (không LLM, không chunk). Dùng để hiển thị nhanh
+trong UI và tính đề xuất chunk params.
+
+```python
+{
+    "n_pages": 124,
+    "total_chars": 380_512,
+    "avg_chars_per_page": 3068.6,
+}
+```
+
+### `recommend_chunk_params(total_chars) -> dict`
+
+Đề xuất `chunk_size` + `overlap` theo size doc (KHÔNG hard-code domain):
+
+| Size doc (chars) | chunk_size | overlap | Lý do |
+|------------------|-----------|---------|--------|
+| < 50k | 1200 | 180 | Doc nhỏ — chunk vừa phải đủ context |
+| 50k - 400k | 1000 | 150 | **Granular nhất** — ép LLM tách identifier/proper noun |
+| > 400k | 1200 | 180 | Cân giữa granular và rate limit |
+
+**Trade-off**: chunk nhỏ = nhiều LLM call (đắt 1.5-2×) nhưng coverage entity
+cao hơn ~10× cho doc có nhiều identifier rải rác (Control IDs, person names, ...).
+
+Returns:
+```python
+{
+    "chunk_size": 1000,
+    "overlap": 150,
+    "est_chunks": 380,
+    "reason": "Doc vừa-lớn — chunk nhỏ ép LLM tách từng identifier/proper noun...",
+}
+```
 
 ### `load_pdf_chunks(pdf_path, chunk_size, chunk_overlap) -> List[Document]`
 
@@ -41,7 +77,7 @@ khi không cần context (legacy).
 Hàm chính (recommended). Pipeline:
 1. Gọi `load_pdf_chunks` để có chunks thô
 2. Build `full_text` bằng cách join chunks
-3. Gọi `document_context.analyze_document()` → `DocumentContext`
+3. Gọi `document_context.analyze_document()` → `DocumentContext` (LLM `extraction_model`)
 4. Map mỗi chunk → section (qua offset trong full_text)
 5. Prepend context prefix vào `page_content` của mỗi chunk
 6. Trả về `(chunks, context)`

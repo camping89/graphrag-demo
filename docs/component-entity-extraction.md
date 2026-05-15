@@ -16,12 +16,15 @@
 
 ```python
 # Đầu vào
-cfg: Config                              # MongoDB URI, OpenAI key, chat_model
+cfg: Config                              # MongoDB URI, OpenAI key, extraction/query model
 chunks: List[Document]                   # đã có context prefix (từ pdf_loader)
-chat_model: Optional[ChatOpenAI] = None  # override default
+chat_model: Optional[ChatOpenAI] = None  # override default (= extraction_model)
 progress_callback: Optional[Callable[[int, int], None]]
 max_workers: int = 5                     # parallel concurrency
 failed_callback: Optional[Callable[[int, int], None]]
+thread_initializer: Optional[Callable[[], None]] = None  # vd Streamlit ScriptRunContext
+error_callback: Optional[Callable[[int, str], None]] = None  # gọi mỗi chunk fail
+cancel_event: Optional[threading.Event] = None           # user bấm Stop → skip remaining
 
 # Đầu ra
 MongoDBGraphStore                        # collection đã được populate
@@ -30,16 +33,24 @@ MongoDBGraphStore                        # collection đã được populate
 **Side effect chính**: Documents được **upsert** vào
 `db[cfg.mongodb_db][cfg.mongodb_collection]`. Mỗi entity = 1 MongoDB document.
 
-## 🧩 3 hàm public
+## 🧩 4 hàm public
 
-### `make_chat_model(cfg) -> ChatOpenAI`
-Khởi tạo LLM client. Tách ra để dễ override (mock test, swap model).
+### `make_extraction_model(cfg) -> ChatOpenAI`
+Khởi tạo LLM **NHANH + RẺ** cho build pipeline (gọi N lần/doc).
+→ `cfg.extraction_model` (default `gpt-5-mini`).
+
+### `make_query_model(cfg) -> ChatOpenAI`
+Khởi tạo LLM **CHẤT LƯỢNG** cho query pipeline (gọi 1-2 lần/Q).
+→ `cfg.query_model` (default `gpt-5`). Dùng bởi `query_engine.py`.
+
+> `make_chat_model = make_extraction_model` — alias backward-compat cho code cũ.
 
 ### `make_graph_store(cfg, chat_model=None) -> MongoDBGraphStore`
 Khởi tạo `MongoDBGraphStore` từ `langchain-mongodb`. Tham số:
 - `connection_string`: Mongo URI
 - `database_name` + `collection_name`
-- `entity_extraction_model`: LLM dùng cho extraction
+- `entity_extraction_model`: LLM dùng cho extraction (default = `make_extraction_model(cfg)`;
+  query_engine truyền `make_query_model(cfg)` riêng).
 
 ### `build_graph(cfg, chunks, ..., max_workers=5)` — hàm chính
 
@@ -87,19 +98,45 @@ errors: list[tuple[int, str]] = []
 
 def _process_one(idx_and_chunk):
     idx, chunk = idx_and_chunk
+    # Cancel check: user bấm Stop → skip chunk
+    if cancel_event is not None and cancel_event.is_set():
+        with counter_lock:
+            counter["done"] += 1
+            done_now = counter["done"]
+        if progress_callback:
+            progress_callback(done_now, total)
+        return
     err = _add_with_retry(store, chunk)
     if err:
         with counter_lock:
             errors.append((idx, err))
+            fail_count_now = len(errors)
+        # IMPORTANT: failed_callback TRƯỚC error_callback — error_callback
+        # đọc state["failed"], cần update count xong rồi mới render UI.
+        if failed_callback:
+            failed_callback(fail_count_now, total)
+        if error_callback:
+            error_callback(idx, err)
     with counter_lock:
         counter["done"] += 1
         done_now = counter["done"]
     if progress_callback:
         progress_callback(done_now, total)
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+with concurrent.futures.ThreadPoolExecutor(
+    max_workers=max_workers,
+    initializer=thread_initializer,   # attach Streamlit ctx hoặc setup khác
+) as pool:
     list(pool.map(_process_one, enumerate(chunks)))
 ```
+
+**Mới**:
+- `thread_initializer` — chạy 1 lần khi worker thread spawn. UI dùng để
+  `add_script_run_ctx()` → worker mới gọi được `st.session_state`.
+- `cancel_event` — `threading.Event` user bấm Stop → các chunk chưa xử lý bị skip.
+- `error_callback(idx, err)` — gọi mỗi chunk fail → UI live update danh sách lỗi.
+- **Callback order** — `failed_callback` trước `error_callback` (race-condition fix:
+  error_callback đọc state count, phải update trước).
 
 **Thread safety guarantees:**
 - `pymongo.Collection.update_one` — atomic upsert, thread-safe
@@ -116,18 +153,25 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
 
 ### `_is_retryable(exc) -> bool`
 
-Heuristic dựa trên error message:
+Heuristic dựa trên error message — bao trùm 3 nhóm lỗi transient:
 
 ```python
 _RETRYABLE_KEYWORDS = (
+    # Rate limit / quota
     "rate", "429", "too many", "overloaded",
-    "timeout", "503", "502", "504"
+    # Network / upstream
+    "timeout", "503", "502", "504",
+    # JSON parse fail từ LLM output — lần sau LLM có thể gen valid JSON
+    "expecting", "json", "unterminated", "invalid \\escape", "extra data",
 )
 
 def _is_retryable(exc):
     msg = str(exc).lower()
     return any(k in msg for k in _RETRYABLE_KEYWORDS)
 ```
+
+> Nhóm JSON parse được thêm sau khi gặp `Expecting property name enclosed in double quotes`
+> — gpt-5-mini đôi khi trả JSON malformed; retry thường fix.
 
 ### `_add_with_retry(store, chunk, max_retries=4) -> Optional[str]`
 

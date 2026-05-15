@@ -46,14 +46,27 @@ MONGODB_URI=mongodb+srv://myuser:mypassword@cluster0.xxxx.mongodb.net/?retryWrit
 ```env
 MONGODB_DB=my_db
 MONGODB_COLLECTION=my_kb
-OPENAI_CHAT_MODEL=gpt-5
+OPENAI_EXTRACTION_MODEL=gpt-5-mini       # NHANH + RẺ cho build (N chunks)
+OPENAI_QUERY_MODEL=gpt-5                 # CHẤT LƯỢNG cho chat (1 lần/Q)
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
+
+> **Migration**: nếu bạn đã có `OPENAI_CHAT_MODEL=gpt-5` từ phiên bản cũ → vẫn work
+> (backward compat). Code sẽ dùng giá trị này cho cả 2 vai trò extraction + query.
 
 **`OPENAI_API_KEY`** — chỉ cần điền nếu chưa có sẵn trong env máy:
 ```env
 OPENAI_API_KEY=sk-...
 ```
+
+**Deploy lên Streamlit Cloud**: dùng `st.secrets` (TOML) thay vì `.env`:
+```toml
+MONGODB_URI = "mongodb+srv://..."
+OPENAI_API_KEY = "sk-..."
+OPENAI_EXTRACTION_MODEL = "gpt-5-mini"
+OPENAI_QUERY_MODEL = "gpt-5"
+```
+`app.py` tự sync `st.secrets` → `os.environ` lúc startup.
 
 ### Bước 4: Kiểm tra setup
 
@@ -76,14 +89,17 @@ streamlit run app.py
 **Trong tab "1️⃣ Build Graph":**
 
 1. **Bước 1**: Upload file PDF (CV/báo cáo của bạn)
+   - UI tự phân tích pages + tổng chars → đề xuất `chunk_size/overlap` phù hợp
+   - Bấm **✅ Áp dụng đề xuất** để pre-fill tham số bên dưới
 2. **Bước 2**: chọn "Tạo collection mới" → bấm **💡 Suggest từ tên file** → tự fill
-3. **Bước 3**:
-   - Chunk size: `1500` (default)
-   - Overlap: `200`
+3. **Bước 3** (tham số đã pre-fill từ đề xuất, có thể chỉnh):
    - Limit chunks: **`5`** (test rẻ lần đầu, sau đó tăng lên)
    - Workers: `5`
 4. Bấm **🚀 Build graph**
-5. Đợi 1-2 phút → thấy banner "✅ Build xong!"
+5. Đợi 1-2 phút → thấy banner "✅ Build xong! N entities"
+6. **Auto-normalize** chạy ngay sau build → merge duplicate entities (vd 3 variant
+   của "Information Security Policy" → 1 entity gộp đầy đủ).
+7. (Optional) Bấm **🧬 Build embeddings** để enable Hybrid mode khi chat
 
 **Sang tab "2️⃣ Chat":**
 

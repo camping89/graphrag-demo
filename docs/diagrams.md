@@ -23,6 +23,7 @@ graph TB
 
     subgraph "Extraction Layer"
         GraphBuilder[graph_builder.py]
+        EntityNormalizer[entity_normalizer.py]
         EntityEmbedder[entity_embedder.py]
     end
 
@@ -46,6 +47,9 @@ graph TB
     PDFLoader --> GraphBuilder
     GraphBuilder --> OpenAI
     GraphBuilder --> Atlas
+    GraphBuilder --> EntityNormalizer
+    EntityNormalizer --> Atlas
+    EntityNormalizer --> EntityEmbedder
     EntityEmbedder --> OpenAI
     EntityEmbedder --> Atlas
     QueryEngine --> OpenAI
@@ -59,6 +63,7 @@ graph TB
     AppPy --> TabViz
     TabBuild --> PDFLoader
     TabBuild --> GraphBuilder
+    TabBuild --> EntityNormalizer
     TabBuild --> EntityEmbedder
     TabChat --> QueryEngine
     TabViz --> Visualizer
@@ -73,7 +78,7 @@ graph TB
 
     class PDF,OpenAI,Atlas external
     class PDFLoader,DocCtx ingestion
-    class GraphBuilder,EntityEmbedder extraction
+    class GraphBuilder,EntityNormalizer,EntityEmbedder extraction
     class QueryEngine,Visualizer query
     class AppPy,Sidebar,TabBuild,TabChat,TabViz,Shared ui
 ```
@@ -89,52 +94,57 @@ sequenceDiagram
     participant LLM as OpenAI
     participant Builder as graph_builder
     participant Mongo as MongoDB Atlas
+    participant Norm as entity_normalizer
     participant Embed as entity_embedder
 
-    U->>UI: Upload PDF + chọn collection
+    U->>UI: Upload PDF
+    UI->>Loader: pdf_stats(pdf) → đề xuất chunk params
+    U->>UI: ✅ Áp dụng đề xuất + chọn collection + Build
     UI->>Loader: load_pdf_chunks_with_context(pdf, cfg)
     Loader->>Loader: PyPDFLoader.load() → pages
     Loader->>Loader: RecursiveCharacterTextSplitter → chunks
     Loader->>Ctx: analyze_document(cfg, full_text)
-    Ctx->>Ctx: detect_sections_regex(full_text)
-    Ctx->>Ctx: _stratified_sample(full_text)
-    Ctx->>LLM: ChatOpenAI.invoke(prompt)
+    Ctx->>LLM: ChatOpenAI(extraction_model).invoke(prompt)
     LLM-->>Ctx: {subjects, doc_type, sections}
-    Ctx->>Ctx: _locate_titles_in_text → Section[]
     Ctx-->>Loader: DocumentContext
-    Loader->>Loader: Prepend context prefix to each chunk
     Loader-->>UI: (chunks, doc_ctx)
 
-    UI->>UI: Show detected context (subjects, sections)
-    UI->>Builder: build_graph(cfg, chunks, max_workers=5)
+    UI->>Builder: build_graph(cfg, chunks, max_workers=5,<br/>thread_initializer, cancel_event)
 
-    par For each chunk in parallel (5 workers)
+    par For each chunk in parallel (5 workers, extraction_model)
         Builder->>LLM: store.add_documents([chunk])
         Note over LLM: Extract entities + relationships
-        LLM-->>Builder: extracted data
+        LLM-->>Builder: extracted data (retry on 429/JSON parse)
         Builder->>Mongo: update_one(_id, $set, upsert=True)
         Mongo-->>Builder: ack
     end
 
-    Builder-->>UI: MongoDBGraphStore (with progress callbacks)
+    Builder-->>UI: MongoDBGraphStore
 
-    opt User opt-in Hybrid Mode
-        U->>UI: Bấm "Build embeddings"
-        UI->>Embed: ensure_vector_index(cfg, coll)
-        Embed->>Mongo: create_search_index(vectorSearch)
-        Mongo-->>Embed: index READY
+    Note over UI,Norm: AUTO-NORMALIZE ngay sau build
+    UI->>Norm: find_merge_candidates(cfg, coll)
+    Norm->>Mongo: find({}) — scan duplicates
+    Mongo-->>Norm: entities[]
+    Norm-->>UI: list[MergePlan]
+    UI->>Norm: apply_merge_plans(cfg, coll, plans)
+    Norm->>Mongo: update winner + redirect refs + delete losers
+    Norm-->>UI: {merged: N, deleted: M}
 
-        loop For each entity without embedding
-            Embed->>Embed: entity_to_text(entity)
-            Embed->>LLM: embed_query(text)
-            LLM-->>Embed: vector[1536]
-            Embed->>Mongo: update_one($set: {embedding: vector})
-        end
+    Note over UI,Embed: AUTO-EMBED sau normalize
+    UI->>Embed: ensure_vector_index(cfg, coll)
+    Embed->>Mongo: create_search_index(vectorSearch)
+    Mongo-->>Embed: index READY
 
-        Embed-->>UI: count embedded
+    loop For each entity (force=True nếu normalize đã đổi data)
+        Embed->>Embed: entity_to_text(entity)
+        Embed->>LLM: embed_query(text)
+        LLM-->>Embed: vector[1536]
+        Embed->>Mongo: update_one($set: {embedding: vector})
     end
 
-    UI-->>U: ✅ Build complete!
+    Embed-->>UI: count embedded
+
+    UI-->>U: ✅ Build + normalize + embed complete!
 ```
 
 ## 3. Phase 2: Query (sequence diagram)
@@ -157,7 +167,7 @@ sequenceDiagram
     Engine->>Engine: _gather_anchor_entities(question, k=10)
 
     Engine->>Store: extract_entity_names(question)
-    Store->>LLM: query_prompt | chat_model
+    Store->>LLM: query_prompt | query_model (gpt-5)
     LLM-->>Store: ["Pham Tuyen", "Veek Co.", ...]
     Store-->>Engine: extracted_names
 
@@ -185,9 +195,12 @@ sequenceDiagram
     Engine->>Engine: _sort_for_context(related, anchors)
     Note over Engine: Tier1: anchors, Tier2: depth=0, Tier3+: depth=N
 
-    Engine->>Engine: cap[:80] + strip embedding field
+    Engine->>Engine: _diversify_truncate(sorted, 80, anchors)
+    Note over Engine: Anchors LUÔN giữ; non-anchors round-robin theo type<br/>→ context cân bằng giữa Person/Org/Control/...
 
-    Engine->>LLM: rag_prompt | chat_model
+    Engine->>Engine: strip embedding field
+
+    Engine->>LLM: rag_prompt | query_model (gpt-5)
     Note over LLM: Context: 80 entities + schema + query
     LLM-->>Engine: AIMessage(content)
 
@@ -230,22 +243,23 @@ sequenceDiagram
 stateDiagram-v2
     [*] --> InChunk: text mentioned
 
-    InChunk --> Extracted: LLM extract<br/>(graph_builder)
+    InChunk --> Extracted: LLM extract<br/>(graph_builder, extraction_model)
     Extracted --> WrittenToMongo: store.add_documents()<br/>upsert
 
-    WrittenToMongo --> Merged: Mention trong chunk khác<br/>→ update_one merges
-    Merged --> WrittenToMongo: continue building
+    WrittenToMongo --> MergedSameChunk: Mention trong chunk khác<br/>→ update_one merges
+    MergedSameChunk --> WrittenToMongo: continue building
 
-    WrittenToMongo --> Embedded: backfill_embeddings()<br/>(optional)
+    WrittenToMongo --> NormalizedDup: entity_normalizer<br/>(merge variants cùng canonical key)
+    NormalizedDup --> Embedded: backfill_embeddings<br/>(force=True sau normalize)
 
     Embedded --> SearchableSemantic: $vectorSearch ready
-    WrittenToMongo --> TraversedGraph: $graphLookup
+    NormalizedDup --> TraversedGraph: $graphLookup
     SearchableSemantic --> ContextSent: query_engine.ask()
     TraversedGraph --> ContextSent
 
-    ContextSent --> SortedAndCapped: _sort_for_context<br/>cap[:80]
+    ContextSent --> SortedAndCapped: _sort_for_context<br/>+ _diversify_truncate (80)
     SortedAndCapped --> StrippedEmbedding: remove embedding field
-    StrippedEmbedding --> SentToLLM: rag_prompt
+    StrippedEmbedding --> SentToLLM: rag_prompt (query_model)
     SentToLLM --> [*]: Used in answer
 ```
 
@@ -258,6 +272,7 @@ graph LR
     PDFLoader[pdf_loader.py]
     DocCtx[document_context.py]
     Builder[graph_builder.py]
+    Normalizer[entity_normalizer.py]
     Embedder[entity_embedder.py]
     Engine[query_engine.py]
     Viz[visualizer.py]
@@ -272,6 +287,7 @@ graph LR
     Config --> PDFLoader
     Config --> DocCtx
     Config --> Builder
+    Config --> Normalizer
     Config --> Embedder
     Config --> Engine
     Config --> Viz
@@ -279,6 +295,8 @@ graph LR
     DocCtx --> PDFLoader
     PDFLoader --> Builder
     Builder --> Engine
+    Builder --> Normalizer
+    Normalizer --> Embedder
     Embedder --> Engine
 
     Config --> Shared
@@ -291,6 +309,7 @@ graph LR
 
     PDFLoader --> TabBuild
     Builder --> TabBuild
+    Normalizer --> TabBuild
     Embedder --> TabBuild
     Engine --> TabChat
     Viz --> TabViz
@@ -305,7 +324,7 @@ graph LR
     classDef ui fill:#e3f2fd,stroke:#1565c0
 
     class Config foundation
-    class PDFLoader,DocCtx,Builder,Embedder,Engine,Viz backend
+    class PDFLoader,DocCtx,Builder,Normalizer,Embedder,Engine,Viz backend
     class Shared,Sidebar,TabBuild,TabChat,TabViz,App ui
 ```
 
@@ -316,7 +335,7 @@ flowchart TD
     Start([store.add_documents call]) --> Try[Try LLM extraction]
     Try --> Success{Success?}
     Success -->|Yes| Done([Return None])
-    Success -->|No| Check{Retryable?<br/>429/timeout/5xx}
+    Success -->|No| Check{Retryable?<br/>429 / timeout / 5xx<br/>/ JSON parse fail}
     Check -->|No| FailFast([Return error message])
     Check -->|Yes| MaxRetry{attempt < 4?}
     MaxRetry -->|No| Exhausted([Return error - log])
@@ -352,8 +371,9 @@ flowchart TD
     Hybrid --> Traverse
 
     Traverse --> Sort[_sort_for_context<br/>anchors → depth0 → depth1+]
-    Sort --> Cap[Cap top 80<br/>strip embedding]
-    Cap --> RAG[rag_prompt<br/>LLM call]
+    Sort --> Diversify[_diversify_truncate<br/>anchors + round-robin theo type]
+    Diversify --> Strip[Strip embedding field]
+    Strip --> RAG[rag_prompt<br/>LLM call query_model]
     RAG --> Answer([Answer + metadata])
 
     classDef llm fill:#ffe0b2,stroke:#f57c00
@@ -509,8 +529,9 @@ flowchart TB
     T3 --> Concat
 
     Concat --> Cap[Cap top 80]
-    Cap --> Strip[Strip embedding field]
-    Strip --> Context[Final context<br/>for RAG prompt]
+    Cap --> Diversify[_diversify_truncate<br/>round-robin theo type]
+    Diversify --> Strip[Strip embedding field]
+    Strip --> Context[Final context<br/>for RAG prompt — query_model]
 
     classDef p1 fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px
     classDef p2 fill:#fff9c4,stroke:#f9a825

@@ -36,14 +36,20 @@ QueryResult:
 class GraphRAGQueryEngine:
     def __init__(self, cfg, store=None):
         self._cfg = cfg
-        self._store = store or make_graph_store(cfg)
+        # Query path → query_model (CHẤT LƯỢNG) cho extract entity từ câu hỏi
+        # + RAG response. Build path tạo store riêng với extraction_model.
+        self._store = store or make_graph_store(cfg, chat_model=make_query_model(cfg))
 
     def ask(self, question: str) -> QueryResult:
         anchors, used_vector = self._gather_anchor_entities(question)
         related_ids = self._traverse_graph(anchors)
+        # LUÔN đi qua path custom_anchors (kể cả graph-only) — unified path
         response = self._chat_with_custom_anchors(question, anchors)
         return QueryResult(...)
 ```
+
+> **Lưu ý 2-model**: build dùng `extraction_model` (gpt-5-mini), query dùng
+> `query_model` (gpt-5). Cùng `Config` nhưng 2 LLM instance khác nhau.
 
 ## 🔀 2 modes operation
 
@@ -126,23 +132,16 @@ db.coll.aggregate([
 
 → Đi đệ quy từ anchors qua `target_ids` đến độ sâu `maxDepth=2` mặc định.
 
-### Step 3: Decide RAG path
+### Step 3: Unified RAG path
 
 ```python
-if used_vector and anchors:
-    response = self._chat_with_custom_anchors(question, anchors)
-else:
-    response = self._store.chat_response(question)
+# Trước: rẽ nhánh giữa store.chat_response và _chat_with_custom_anchors
+# Giờ: LUÔN qua _chat_with_custom_anchors nếu có anchors — đơn giản, đồng nhất
+response = self._chat_with_custom_anchors(question, anchors)
 ```
 
-**`store.chat_response()` mặc định**:
-- Internal: `similarity_search(question)` → `extract_entity_names + related_entities`
-- Limitation: chỉ dùng `extract_entity_names`, không có vector search
-
-**`_chat_with_custom_anchors()` — custom path**:
-- Dùng anchors đã merge (extract + vector)
-- Sort entities + strip embedding
-- Gọi rag_prompt với cleaned context
+→ Không còn rẽ nhánh giữa hybrid và graph-only ở RAG step. Sự khác biệt 2 mode
+chỉ nằm ở **anchors source** (extract-only vs extract + vector).
 
 ### Step 4: `_chat_with_custom_anchors(question, anchors)`
 
@@ -153,12 +152,16 @@ def _chat_with_custom_anchors(self, question, anchors):
     # Sort theo priority → anchors trước, depth=0, depth=1+...
     sorted_entities = _sort_for_context(related_entities, anchors)
 
-    # Strip embedding + cap
-    cleaned = []
-    for ent in sorted_entities[:MAX_ENTITIES_IN_CONTEXT]:  # 80
-        cleaned.append({k: v for k, v in ent.items() if k != "embedding"})
+    # Diversify cap — round-robin theo type thay vì cắt 80 đầu list
+    capped = _diversify_truncate(sorted_entities, MAX_ENTITIES_IN_CONTEXT, anchors)
 
-    # RAG prompt
+    # Strip embedding
+    cleaned = [
+        {k: v for k, v in ent.items() if k != "embedding"}
+        for ent in capped
+    ]
+
+    # RAG prompt — dùng query_model (đã inject qua make_graph_store)
     chain = rag_prompt | self._store.entity_extraction_model
     return chain.invoke({
         "query": question,
@@ -201,6 +204,45 @@ def _sort_for_context(entities, anchors):
 3. **depth=1, 2, ...** — entities reached qua traversal, càng xa càng ít quan trọng.
 
 Sau sort: cap [:80] đảm bảo anchors LUÔN có trong context.
+
+## 🎨 `_diversify_truncate` — round-robin theo type
+
+**Vấn đề**: nếu chỉ sort theo priority rồi cap 80 đầu list, có thể 80 slot toàn
+cùng 1 `type` (vd `Concept`). Missing các `Organization`/`Control` quan trọng.
+
+```python
+def _diversify_truncate(entities, max_n, anchors):
+    anchor_set = set(anchors)
+    anchor_ents = [e for e in entities if e.get("_id") in anchor_set]
+    rest = [e for e in entities if e.get("_id") not in anchor_set]
+
+    selected = list(anchor_ents[:max_n])  # anchors LUÔN giữ
+    slots = max_n - len(selected)
+
+    # Group non-anchors theo type, giữ thứ tự priority trong mỗi group
+    by_type = {}
+    for e in rest:
+        by_type.setdefault(e.get("type") or "(no_type)", []).append(e)
+
+    # Round-robin: mỗi vòng lấy 1 entity / type
+    while slots > 0 and any(by_type.values()):
+        for tk in list(by_type.keys()):
+            if not by_type[tk]:
+                continue
+            selected.append(by_type[tk].pop(0))
+            slots -= 1
+            if slots == 0:
+                break
+
+    return selected
+```
+
+**Strategy 2-pass**:
+1. **Anchors** luôn giữ nguyên (tối quan trọng — chứa edge attrs).
+2. **Non-anchors**: round-robin theo type. Vòng 1: mỗi type lấy 1; vòng 2: lấy thêm 1; ...
+   → Mọi type ≥ 1 slot trước khi 1 type nào đó được nhân lên nhiều.
+
+→ Context window cân bằng giữa các loại entity → LLM tổng hợp được nhiều khía cạnh.
 
 ## 📊 Constants
 

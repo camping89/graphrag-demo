@@ -89,14 +89,27 @@ def backfill_embeddings(cfg, collection_name, progress_callback=None, force=Fals
 ```
 
 **Idempotent**: chạy lại sẽ skip entities đã có `embedding` field. `force=True`
-để re-compute toàn bộ (sau khi đổi model hoặc thay logic `entity_to_text`).
+để re-compute toàn bộ.
+
+**Khi nào cần `force=True`?**
+1. Đổi `OPENAI_EMBEDDING_MODEL` (vd `text-embedding-3-small` → `-3-large`)
+2. Thay logic `entity_to_text()` (vd thêm relationships info)
+3. **Sau khi `entity_normalizer` merge** — winner có attrs/rels mới (từ losers gộp vào)
+   → embedding cũ stale → MUST re-embed.
+
+> UI tự gọi `backfill_embeddings(force=True)` sau auto-normalize. Manual flow:
+> ```powershell
+> python scripts/normalize-collection.py --collection X --apply
+> python scripts/rebuild-embeddings.py --collection X --force
+> ```
 
 **Chi phí**:
 - text-embedding-3-small: $0.02 / 1M tokens
 - 1 entity ~ 100 tokens → ~$0.000002/entity
 - Collection 100 entities → ~$0.0002
+- Collection 2000 entities → ~$0.004 (vẫn rẻ)
 
-→ Cực rẻ. Có thể chạy thoải mái.
+→ Cực rẻ. Có thể chạy thoải mái với `--force`.
 
 ## 📍 `ensure_vector_index(cfg, collection_name)`
 

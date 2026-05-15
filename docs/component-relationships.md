@@ -13,12 +13,13 @@
                                       │ load_config()
                   ┌───────────────────┼───────────────────────┐
                   │                   │                       │
-        ┌─────────▼────────┐  ┌───────▼──────────┐  ┌─────────▼─────────┐
-        │  Data Ingestion  │  │  Extraction      │  │  Query            │
-        │                  │  │                  │  │                   │
-        │  pdf_loader      │  │  graph_builder   │  │  query_engine     │
-        │  document_context│  │  entity_embedder │  │                   │
-        └─────────┬────────┘  └───────┬──────────┘  └─────────┬─────────┘
+        ┌─────────▼────────┐  ┌───────▼───────────┐  ┌─────────▼─────────┐
+        │  Data Ingestion  │  │  Extraction       │  │  Query            │
+        │                  │  │                   │  │                   │
+        │  pdf_loader      │  │  graph_builder    │  │  query_engine     │
+        │  document_context│  │  entity_normalizer│  │                   │
+        │                  │  │  entity_embedder  │  │                   │
+        └─────────┬────────┘  └───────┬───────────┘  └─────────┬─────────┘
                   │                   │                       │
                   └─────────┬─────────┴───────────┬───────────┘
                             │                     │
@@ -48,38 +49,40 @@
 ## 📦 Layers & responsibilities
 
 ### Layer 0: **Foundation**
-| Module | Responsibility |
-|--------|----------------|
-| `config.py` | Centralized env loading, `Config` dataclass |
-| `.env` | Persistent config (MONGODB_URI) |
+| Module                | Responsibility                                                               |
+|-----------------------|------------------------------------------------------------------------------|
+| `config.py`           | Centralized env loading, `Config` dataclass (extraction_model + query_model) |
+| `version.py`          | `__version__` — bump mỗi lần fix/ship → hiển thị trên sidebar                |
+| `.env` / `st.secrets` | Persistent config (MONGODB_URI, OPENAI_API_KEY, models)                      |
 
 ### Layer 1: **Data Ingestion**
-| Module | Input | Output |
-|--------|-------|--------|
-| `pdf_loader.py` | PDF file | `(chunks, DocumentContext)` |
-| `document_context.py` | full_text | `DocumentContext` |
+| Module                | Input     | Output                      |
+|-----------------------|-----------|-----------------------------|
+| `pdf_loader.py`       | PDF file  | `(chunks, DocumentContext)` |
+| `document_context.py` | full_text | `DocumentContext`           |
 
 ### Layer 2: **Extraction & Storage**
-| Module | Input | Output |
-|--------|-------|--------|
-| `graph_builder.py` | chunks | MongoDB writes (entities) |
-| `entity_embedder.py` | collection | MongoDB updates (embedding field) + Atlas Vector Index |
+| Module                 | Input      | Output                                                 |
+|------------------------|------------|--------------------------------------------------------|
+| `graph_builder.py`     | chunks     | MongoDB writes (entities) — dùng `extraction_model`    |
+| `entity_normalizer.py` | collection | MongoDB writes (merge duplicates) — no LLM             |
+| `entity_embedder.py`   | collection | MongoDB updates (embedding field) + Atlas Vector Index |
 
 ### Layer 3: **Query**
-| Module | Input | Output |
-|--------|-------|--------|
-| `query_engine.py` | question | `QueryResult(answer, anchors, related, mode)` |
-| `visualizer.py` | collection | HTML file |
+| Module            | Input      | Output                                                             |
+|-------------------|------------|--------------------------------------------------------------------|
+| `query_engine.py` | question   | `QueryResult(answer, anchors, related, mode)` — dùng `query_model` |
+| `visualizer.py`   | collection | HTML file                                                          |
 
 ### Layer 4: **Presentation**
-| Module | Role |
-|--------|------|
-| `app.py` | Entry point + tab routing |
-| `ui/shared.py` | Cached resources |
-| `ui/sidebar.py` | Global state (active collection) |
-| `ui/tab_build.py` | Phase 1 UI |
-| `ui/tab_chat.py` | Phase 2 UI |
-| `ui/tab_visualize.py` | Phase 3 UI |
+| Module                | Role                             |
+|-----------------------|----------------------------------|
+| `app.py`              | Entry point + tab routing        |
+| `ui/shared.py`        | Cached resources                 |
+| `ui/sidebar.py`       | Global state (active collection) |
+| `ui/tab_build.py`     | Phase 1 UI                       |
+| `ui/tab_chat.py`      | Phase 2 UI                       |
+| `ui/tab_visualize.py` | Phase 3 UI                       |
 
 ## 🔄 Tương tác chi tiết theo data flow
 
@@ -132,14 +135,32 @@ build_graph(cfg, chunks, max_workers=5, ...)
   returns MongoDBGraphStore
   │
   ▼
-[Optional] backfill_embeddings(cfg, collection, ...)
+[Auto] entity_normalizer (NO LLM, chỉ MongoDB)
+  │
+  ├─► find_merge_candidates(cfg, collection)
+  │     ├─► coll.find({}) — scan
+  │     ├─► group theo (type, canonical_key)
+  │     └─► returns list[MergePlan]
+  │
+  └─► apply_merge_plans(cfg, collection, plans)
+        For each plan:
+          ├─► merge attributes (union)
+          ├─► merge relationships (concat + dedupe theo (type, target))
+          ├─► update_one(winner, $set)              ← MONGODB WRITE
+          ├─► update_many(refs trỏ tới losers)      ← MONGODB WRITE
+          └─► delete_many(losers)                   ← MONGODB DELETE
+
+  returns {merged_groups, deleted_entities, redirected_refs}
+  │
+  ▼
+[Auto sau normalize] backfill_embeddings(cfg, collection, force=True)
   │
   ├─► ensure_vector_index(cfg, collection)
   │     ├─► check existing index
   │     ├─► if missing: coll.create_search_index(...)  ← ATLAS API
   │     └─► poll until READY
   │
-  └─► For each entity not yet embedded:
+  └─► For each entity (force=True → kể cả entity đã có embedding):
         ├─► entity_to_text(entity)
         ├─► embedder.embed_query(text)  ← OPENAI API
         └─► coll.update_one(_id, $set: {embedding: vector})
@@ -159,7 +180,8 @@ get_query_engine(collection_name)
   │
   └─► cached → reuse hoặc tạo mới:
         GraphRAGQueryEngine(cfg)
-          └─► self._store = make_graph_store(cfg)
+          └─► self._store = make_graph_store(cfg, chat_model=make_query_model(cfg))
+                └─► dùng query_model (gpt-5) cho extract + RAG
 
   returns engine
   │
@@ -189,7 +211,10 @@ engine.ask(question)
         ├─► _sort_for_context(related, anchors)
         │     └─► priority: anchors > depth=0 > depth=N
         │
-        ├─► cap [:80] + strip "embedding" field
+        ├─► _diversify_truncate(sorted, 80, anchors)
+        │     └─► anchors LUÔN giữ; non-anchors round-robin theo type
+        │
+        ├─► strip "embedding" field
         │
         └─► rag_prompt | entity_extraction_model
               └─► chain.invoke({query, related_entities, schema})  ← LLM CALL
@@ -230,18 +255,18 @@ UI: components.html(html_content, height=820)
 ## 🤝 Dependencies matrix
 
 | Module ↓ depends on → | config | pdf_loader | document_context | graph_builder | entity_embedder | query_engine | visualizer | ui/shared |
-|---|---|---|---|---|---|---|---|---|
-| **pdf_loader** | ✅ | — | ✅ | | | | | |
-| **document_context** | ✅ | | — | | | | | |
-| **graph_builder** | ✅ | | | — | | | | |
-| **entity_embedder** | ✅ | | | | — | | | |
-| **query_engine** | ✅ | | | ✅ | ✅ | — | | |
-| **visualizer** | ✅ | | | | | | — | |
-| **ui/shared** | ✅ | | | | | ✅ | | — |
-| **ui/sidebar** | | | | | | | | ✅ |
-| **ui/tab_build** | | ✅ | | ✅ | ✅ | | | ✅ |
-| **ui/tab_chat** | | | | | | ✅ | | ✅ |
-| **ui/tab_visualize** | ✅ | | | | | | ✅ | ✅ |
+|-----------------------|--------|------------|------------------|---------------|-----------------|--------------|------------|-----------|
+| **pdf_loader**        | ✅      | —          | ✅                |               |                 |              |            |           |
+| **document_context**  | ✅      |            | —                |               |                 |              |            |           |
+| **graph_builder**     | ✅      |            |                  | —             |                 |              |            |           |
+| **entity_embedder**   | ✅      |            |                  |               | —               |              |            |           |
+| **query_engine**      | ✅      |            |                  | ✅             | ✅               | —            |            |           |
+| **visualizer**        | ✅      |            |                  |               |                 |              | —          |           |
+| **ui/shared**         | ✅      |            |                  |               |                 | ✅            |            | —         |
+| **ui/sidebar**        |        |            |                  |               |                 |              |            | ✅         |
+| **ui/tab_build**      |        | ✅          |                  | ✅             | ✅               |              |            | ✅         |
+| **ui/tab_chat**       |        |            |                  |               |                 | ✅            |            | ✅         |
+| **ui/tab_visualize**  | ✅      |            |                  |               |                 |              | ✅          | ✅         |
 
 → Dependency graph **không có cycle**. config là root, ui là leaves.
 
@@ -440,15 +465,15 @@ ui/shared cached resources (engine, config)
 
 ## 🌐 External dependencies
 
-| External | Used by | Purpose |
-|----------|---------|---------|
-| **MongoDB Atlas** | graph_builder, entity_embedder, query_engine, visualizer | Persistent storage |
-| **OpenAI API** | document_context, graph_builder, entity_embedder, query_engine | LLM + embeddings |
-| **PyPDF (cryptography)** | pdf_loader | PDF parsing (encrypted support) |
-| **LangChain framework** | All extraction/query modules | Wrappers cho LLM + Mongo |
-| **langchain-mongodb** | graph_builder, query_engine | `MongoDBGraphStore` |
-| **pyvis + networkx** | visualizer | HTML graph render |
-| **Streamlit** | All ui modules | Web framework |
+| External                 | Used by                                                        | Purpose                         |
+|--------------------------|----------------------------------------------------------------|---------------------------------|
+| **MongoDB Atlas**        | graph_builder, entity_embedder, query_engine, visualizer       | Persistent storage              |
+| **OpenAI API**           | document_context, graph_builder, entity_embedder, query_engine | LLM + embeddings                |
+| **PyPDF (cryptography)** | pdf_loader                                                     | PDF parsing (encrypted support) |
+| **LangChain framework**  | All extraction/query modules                                   | Wrappers cho LLM + Mongo        |
+| **langchain-mongodb**    | graph_builder, query_engine                                    | `MongoDBGraphStore`             |
+| **pyvis + networkx**     | visualizer                                                     | HTML graph render               |
+| **Streamlit**            | All ui modules                                                 | Web framework                   |
 
 ## 🧩 Module coupling analysis
 
@@ -493,38 +518,38 @@ Sự đồng bộ qua `st.cache_resource.clear()` sau build.
 
 ## 🛡️ Defense-in-depth chống lỗi
 
-| Layer | Defense |
-|-------|---------|
-| L0 (Foundation) | `_require()` raise nếu thiếu env vars |
-| L1 (Ingestion) | PyPDFLoader try/except, document_context fallback `(unknown)` |
-| L2 (Extraction) | Retry exponential backoff, failed_callback surface |
-| L3 (Query) | Try/except quanh vector_search → fallback Graph-only |
-| L4 (UI) | Try/except quanh `engine.ask`, show error trong chat bubble |
+| Layer           | Defense                                                       |
+|-----------------|---------------------------------------------------------------|
+| L0 (Foundation) | `_require()` raise nếu thiếu env vars                         |
+| L1 (Ingestion)  | PyPDFLoader try/except, document_context fallback `(unknown)` |
+| L2 (Extraction) | Retry exponential backoff, failed_callback surface            |
+| L3 (Query)      | Try/except quanh vector_search → fallback Graph-only          |
+| L4 (UI)         | Try/except quanh `engine.ask`, show error trong chat bubble   |
 
 ## 🔮 Tương lai có thể thay đổi cấu trúc
 
-| Scenario | Affected components | Impact |
-|----------|---------------------|--------|
-| Đổi từ MongoDB → Neo4j | graph_builder, query_engine, entity_embedder, visualizer | High — rewrite layer 2-3 |
-| Đổi từ OpenAI → Claude | config, graph_builder, query_engine | Low — chỉ swap ChatOpenAI |
-| Multi-tenancy (per-user collection) | config, ui/shared, sidebar | Medium — thêm tenant ID |
-| Streaming chat response | query_engine, tab_chat | Medium — async/yield pattern |
-| Cloud deployment (FastAPI thay Streamlit) | All ui/* | High — rewrite UI |
-| Knowledge graph completion (auto-add missing edges) | New module + graph_builder | High — thêm phase post-build |
+| Scenario                                            | Affected components                                      | Impact                       |
+|-----------------------------------------------------|----------------------------------------------------------|------------------------------|
+| Đổi từ MongoDB → Neo4j                              | graph_builder, query_engine, entity_embedder, visualizer | High — rewrite layer 2-3     |
+| Đổi từ OpenAI → Claude                              | config, graph_builder, query_engine                      | Low — chỉ swap ChatOpenAI    |
+| Multi-tenancy (per-user collection)                 | config, ui/shared, sidebar                               | Medium — thêm tenant ID      |
+| Streaming chat response                             | query_engine, tab_chat                                   | Medium — async/yield pattern |
+| Cloud deployment (FastAPI thay Streamlit)           | All ui/*                                                 | High — rewrite UI            |
+| Knowledge graph completion (auto-add missing edges) | New module + graph_builder                               | High — thêm phase post-build |
 
 ## 📊 Component metrics
 
-| Module | LOC | LLM calls/run | DB calls/run | Public API |
-|--------|-----|---------------|--------------|------------|
-| config.py | 54 | 0 | 0 | `load_config()` |
-| pdf_loader.py | 120 | 1 (indirect) | 0 | 2 functions |
-| document_context.py | 343 | 1 | 0 | 1 function + 2 classes |
-| graph_builder.py | 176 | N (per chunk) | N writes | 3 functions |
-| entity_embedder.py | 212 | M (per entity) | M writes + 1 search | 4 functions |
-| query_engine.py | 196 | 3 per query | 2-3 per query | 1 class |
-| visualizer.py | 111 | 0 | 1 read | 4 functions |
-| ui/*.py | ~642 | 0 | 0 (delegate) | render functions |
-| **Total** | **~1854** | | | |
+| Module              | LOC       | LLM calls/run  | DB calls/run        | Public API             |
+|---------------------|-----------|----------------|---------------------|------------------------|
+| config.py           | 54        | 0              | 0                   | `load_config()`        |
+| pdf_loader.py       | 120       | 1 (indirect)   | 0                   | 2 functions            |
+| document_context.py | 343       | 1              | 0                   | 1 function + 2 classes |
+| graph_builder.py    | 176       | N (per chunk)  | N writes            | 3 functions            |
+| entity_embedder.py  | 212       | M (per entity) | M writes + 1 search | 4 functions            |
+| query_engine.py     | 196       | 3 per query    | 2-3 per query       | 1 class                |
+| visualizer.py       | 111       | 0              | 1 read              | 4 functions            |
+| ui/*.py             | ~642      | 0              | 0 (delegate)        | render functions       |
+| **Total**           | **~1854** |                |                     |                        |
 
 ## 📚 Đọc thêm
 

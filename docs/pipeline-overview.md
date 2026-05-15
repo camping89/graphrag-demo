@@ -7,45 +7,50 @@
 
 ```
 graphrag-demo/
-├── app.py                       # Streamlit entry point (38 lines)
+├── app.py                       # Streamlit entry point (81 lines, có sync st.secrets)
 ├── requirements.txt             # Dependencies
-├── .env                         # MONGODB_URI (chỉ field bắt buộc)
+├── .env                         # MONGODB_URI + OPENAI_API_KEY (bắt buộc)
 ├── docs/                        # ← Bạn đang đọc thư mục này
 │   ├── pipeline-overview.md     # File này
 │   ├── component-*.md           # 1 file/component
 │   ├── graphrag-explained.md    # Lý thuyết GraphRAG
 │   └── graphrag-mongodb.md      # MongoDB GraphRAG
 ├── src/
-│   ├── config.py                # Load env vars → Config dataclass
-│   ├── pdf_loader.py            # PDF → chunks với context prefix
+│   ├── version.py               # __version__ — bump mỗi lần fix/ship
+│   ├── config.py                # Load env vars → Config dataclass (2 models)
+│   ├── pdf_loader.py            # PDF → chunks; pdf_stats + recommend_chunk_params
 │   ├── document_context.py      # Phân tích doc → DocumentContext
-│   ├── graph_builder.py         # build_graph + retry + parallel
+│   ├── graph_builder.py         # build_graph + retry + parallel + cancel
 │   ├── entity_embedder.py       # Vector embeddings + Atlas index
-│   ├── query_engine.py          # Hybrid retrieval + RAG assembly
+│   ├── entity_normalizer.py     # Merge duplicate entities (post-build)
+│   ├── query_engine.py          # Hybrid retrieval + diversify + RAG
 │   ├── visualizer.py            # networkx + pyvis HTML render
 │   └── ui/                      # Streamlit UI modules
 │       ├── shared.py            # Cached resources + helpers
-│       ├── sidebar.py           # Active collection selector
-│       ├── tab_build.py         # Tab 1: build graph
+│       ├── sidebar.py           # Version badge + active collection selector
+│       ├── tab_build.py         # Tab 1: build + auto-normalize + embeddings
 │       ├── tab_chat.py          # Tab 2: chat with KG
 │       └── tab_visualize.py     # Tab 3: HTML visualization
 └── scripts/
     ├── build-graph.py           # CLI: build graph từ PDF
     ├── visualize-graph.py       # CLI: render HTML
-    └── debug-query.py           # CLI: inspect collection
+    ├── debug-query.py           # CLI: inspect collection
+    ├── normalize-collection.py  # CLI: merge duplicate entities (dry-run / --apply)
+    └── rebuild-embeddings.py    # CLI: re-embed entities (sau normalize)
 ```
 
-## 🎯 7 component chính
+## 🎯 8 component chính
 
 | # | Component | File | Mô tả ngắn |
 |---|-----------|------|------------|
-| 1 | [PDF Loading & Chunking](component-pdf-loading.md) | `pdf_loader.py` | PDF → Documents → chunks 1500 chars |
+| 1 | [PDF Loading & Chunking](component-pdf-loading.md) | `pdf_loader.py` | PDF → Documents + đề xuất chunk_size theo size |
 | 2 | [Document Context Detection](component-document-context.md) | `document_context.py` | Phân tích chủ thể, type, sections, hierarchy |
 | 3 | [Entity Extraction (Build)](component-entity-extraction.md) | `graph_builder.py` | LLM extract entities + relationships → MongoDB |
 | 4 | [Vector Embedding](component-vector-embedding.md) | `entity_embedder.py` | OpenAI embeddings → Atlas Vector Search |
-| 5 | [Query Engine (Hybrid)](component-query-engine.md) | `query_engine.py` | Vector + Graph hybrid retrieval + RAG |
-| 6 | [Visualization](component-visualization.md) | `visualizer.py` | networkx graph → pyvis HTML interactive |
-| 7 | [Web UI (Streamlit)](component-web-ui.md) | `app.py`, `src/ui/*` | 3-tab interactive demo |
+| 5 | [Entity Normalizer](component-entity-normalizer.md) | `entity_normalizer.py` | Merge duplicate entities (canonical key) |
+| 6 | [Query Engine (Hybrid)](component-query-engine.md) | `query_engine.py` | Vector + Graph + diversify retrieval + RAG |
+| 7 | [Visualization](component-visualization.md) | `visualizer.py` | networkx graph → pyvis HTML interactive |
+| 8 | [Web UI (Streamlit)](component-web-ui.md) | `app.py`, `src/ui/*` | 3-tab interactive demo |
 
 ## 🌐 Data flow tổng quan
 
@@ -176,9 +181,18 @@ class Config:
     mongodb_db: str           # "graphrag_demo"
     mongodb_collection: str   # default collection
     openai_api_key: str
-    chat_model: str           # "gpt-5"
+    extraction_model: str     # "gpt-5-mini" — NHANH + RẺ, dùng cho build (N chunks)
+    query_model: str          # "gpt-5"      — CHẤT LƯỢNG, dùng cho chat (1 lần/Q)
     embedding_model: str      # "text-embedding-3-small"
+
+    @property
+    def chat_model(self) -> str:
+        """Backward-compat — trả về query_model cho code cũ."""
 ```
+
+> **Tại sao tách 2 model?** Build pipeline gọi LLM N lần (N = số chunks, thường 100-500),
+> cần model nhanh + rẻ + TPM cao. Query pipeline gọi 1-2 lần/câu hỏi, cần chất lượng
+> reasoning + tổng hợp context.
 
 ### Document (`langchain_core.documents.Document`)
 ```python
@@ -243,33 +257,45 @@ class QueryResult:
 
 | Knob | Default | Tác động |
 |------|---------|----------|
-| `chunk_size` | 1500 | Mỗi chunk = 1 LLM call extract. Lớn = ít call nhưng context dày |
-| `chunk_overlap` | 200 | Giữ context xuyên ranh giới chunk |
+| `chunk_size` | auto theo size (1000-1200) | Mỗi chunk = 1 LLM call extract. Nhỏ = granular, nhiều entity |
+| `chunk_overlap` | auto theo size (150-180) | Giữ context xuyên ranh giới chunk |
 | `MAX_WORKERS` (build) | 5 | Số chunks parallel. Cao = nhanh, dễ 429 |
 | `MAX_RETRIES` | 4 | Exponential backoff khi 429: 2s, 4s, 8s, 16s |
 | `vector_k` (query) | 10 | Top-K semantic neighbors khi vector search |
-| `MAX_ENTITIES_IN_CONTEXT` | 80 | Cap entities gửi LLM ở RAG step |
-| `chat_model` | gpt-5 | Strongest cho extraction; gpt-4o-mini = 50x rẻ |
+| `MAX_ENTITIES_IN_CONTEXT` | 80 | Cap entities gửi LLM ở RAG step (round-robin theo type) |
+| `extraction_model` | gpt-5-mini | Build pipeline — N call/doc, ưu tiên nhanh + rẻ |
+| `query_model` | gpt-5 | Chat — 1 call/Q, ưu tiên chất lượng reasoning |
 | `embedding_model` | text-embedding-3-small | 1536 dim, đủ cho most use cases |
+
+> `recommend_chunk_params(total_chars)` trong `pdf_loader.py` tự đề xuất:
+> - <50k chars → 1200/180
+> - 50k-400k → 1000/150 (granular nhất)
+> - \>400k → 1200/180 (cân rate limit)
 
 ## 🚦 Lifecycle 1 tài liệu (end-to-end)
 
 1. **User upload PDF** qua Streamlit tab Build hoặc CLI
-2. **Load + chunk** (`pdf_loader.load_pdf_chunks`)
-3. **Analyze doc** (`document_context.analyze_document` — 1 LLM call)
+2. **PDF stats + đề xuất chunk** (`pdf_stats` + `recommend_chunk_params`)
+   - Đếm pages/chars → suggest chunk_size/overlap → user áp dụng
+3. **Load + chunk** (`pdf_loader.load_pdf_chunks`)
+4. **Analyze doc** (`document_context.analyze_document` — 1 LLM call extraction_model)
    - Stratified sample 3 vùng → subjects, type, sections
-4. **Inject context prefix** vào mỗi chunk (`DocumentContext.to_chunk_prefix`)
-5. **Build graph parallel** (`graph_builder.build_graph` — N LLM calls)
-   - 5 workers song song, retry 429 với backoff
-6. **(Optional) Embed entities** (`entity_embedder.backfill_embeddings`)
-   - 1 LLM embedding call/entity
+5. **Inject context prefix** vào mỗi chunk (`DocumentContext.to_chunk_prefix`)
+6. **Build graph parallel** (`graph_builder.build_graph` — N LLM calls extraction_model)
+   - 5 workers song song, retry 429 + JSON parse errors với backoff
+   - thread_initializer → attach Streamlit ScriptRunContext cho worker
+   - cancel_event → user bấm Stop dừng giữa chừng
+7. **Auto-normalize** (`entity_normalizer` — không LLM, chỉ MongoDB)
+   - Group duplicates theo canonical key → merge attrs + redirect refs → delete losers
+8. **Embed entities** (`entity_embedder.backfill_embeddings`)
+   - 1 LLM embedding call/entity (chạy tự động sau normalize, hoặc manual --force)
    - Tạo Atlas Vector Search index
-7. **Query** (`query_engine.ask`)
+9. **Query** (`query_engine.ask` — query_model)
    - extract_entity_names + vector_search → anchors
    - $graphLookup → reached entities
-   - _sort_for_context + cap 80 → RAG prompt → answer
-8. **(Optional) Visualize** (`visualizer.visualize_graph`)
-   - Fetch entities + relationships → networkx → pyvis HTML
+   - `_diversify_truncate` → cap 80 theo round-robin type → RAG prompt → answer
+10. **(Optional) Visualize** (`visualizer.visualize_graph`)
+    - Fetch entities + relationships → networkx → pyvis HTML
 
 ## 📚 Tài liệu chi tiết
 
@@ -279,6 +305,7 @@ class QueryResult:
 - [Document Context Detection](component-document-context.md)
 - [Entity Extraction (Build Graph)](component-entity-extraction.md)
 - [Vector Embedding & Hybrid Mode](component-vector-embedding.md)
+- [Entity Normalizer](component-entity-normalizer.md)
 - [Query Engine (Hybrid Retrieval)](component-query-engine.md)
 - [Visualization](component-visualization.md)
 - [Web UI (Streamlit)](component-web-ui.md)
@@ -289,9 +316,14 @@ class QueryResult:
 2. **Stratified sampling** cho doc lớn 100+ trang
 3. **Multi-subject support** cho audit/contract
 4. **Section-aware chunking** với offset tracking
-5. **Hybrid Vector + Graph** retrieval (giải quyết name mismatch)
-6. **Parallel chunk processing** với ThreadPoolExecutor
-7. **Exponential backoff retry** cho 429 rate limit
-8. **Anchor-priority sorting** khi assemble RAG context
-9. **Frozen Config dataclass** + env-based config
-10. **Modular UI** (mỗi tab = 1 module)
+5. **PDF-aware chunk recommendation** — auto suggest theo size
+6. **Hybrid Vector + Graph** retrieval (giải quyết name mismatch)
+7. **Parallel chunk processing** với ThreadPoolExecutor + cancel_event
+8. **Exponential backoff retry** cho 429 + JSON parse errors
+9. **2-model split** — extraction (nhanh/rẻ) vs query (chất lượng)
+10. **Post-build normalize** — merge duplicate entities tự động
+11. **Diversified context** — round-robin theo type, không bias 1 loại
+12. **Anchor-priority sorting** khi assemble RAG context
+13. **Version badge** trong sidebar — biết code đã reload hay vẫn cache cũ
+14. **Frozen Config dataclass** + env-based config (`.env` hoặc `st.secrets`)
+15. **Modular UI** (mỗi tab = 1 module)

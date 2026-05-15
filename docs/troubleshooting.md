@@ -89,13 +89,35 @@ $env:PYTHONIOENCODING="utf-8"
 ### Build chậm bất thường (1 chunk > 60s)
 
 **Nguyên nhân**:
-- GPT-5 inherently slow (long reasoning)
+- `extraction_model = gpt-5` inherently slow (long reasoning)
 - Workers = 1 (sequential)
 
 **Fix**:
 1. Tăng workers lên 5 (Web UI hoặc `--workers 5` CLI)
-2. Đổi `OPENAI_CHAT_MODEL=gpt-4o-mini` → nhanh hơn 5×, rẻ hơn 50×
+2. Đổi `OPENAI_EXTRACTION_MODEL=gpt-5-mini` (mặc định) → nhanh hơn ~5× và rẻ hơn nhiều
+   Vẫn giữ `OPENAI_QUERY_MODEL=gpt-5` cho chất lượng chat
 3. Cân nhắc dùng `--limit-chunks 20` để test trước
+
+### Chunk #N JSON parse fail (`Expecting property name enclosed in double quotes`)
+
+**Triệu chứng**: 1-2 chunk fail với error JSON parse từ output LLM.
+
+**Nguyên nhân**: gpt-5-mini đôi khi trả JSON malformed (escape sai, thiếu quote).
+
+**Fix**:
+- Code đã thêm các keyword JSON vào `_RETRYABLE_KEYWORDS` (`expecting`, `json`,
+  `unterminated`, `invalid \\escape`, `extra data`) → tự retry 4 lần. Thường lần 2-3 pass.
+- Nếu vẫn fail sau 4 lần: rebuild lại chunk đó (build cùng collection, upsert dedupe).
+
+### Worker thread warning: `missing ScriptRunContext`
+
+**Triệu chứng**: log Streamlit báo `Thread 'XXX' missing ScriptRunContext` khi build parallel.
+
+**Nguyên nhân**: ThreadPoolExecutor spawn worker thread không có Streamlit context →
+`st.session_state` / `st.write` từ worker fail silently.
+
+**Fix**: code đã có `thread_initializer=add_script_run_ctx(...)` truyền vào `build_graph()`.
+Nếu vẫn gặp → đảm bảo `tab_build.py` chưa bị revert về phiên bản cũ.
 
 ### "Build xong với N/total chunks thất bại" warning
 
@@ -107,6 +129,23 @@ $env:PYTHONIOENCODING="utf-8"
 1. Build lại cùng collection — chunks đã succeed sẽ skip (merge), chunks fail sẽ retry. Không lo duplicate vì MongoDBGraphStore dùng upsert.
 2. Giảm workers nếu fail rate > 10%
 
+### "Build thất bại" hiện ra rồi mất ngay (không có chi tiết)
+
+**Triệu chứng**: bấm Build → flash đỏ "Build thất bại" → biến mất sau rerun.
+
+**Nguyên nhân (đã fix)**: `st.error()` render ra rồi `st.rerun()` ngay sau đó nuke message.
+
+**Fix**: code mới lưu traceback vào `st.session_state["last_build_traceback"]` → survive
+rerun, hiển thị trong expander dưới button. Nếu vẫn gặp → kéo xuống cuối tab Build,
+mở expander "🔍 Chi tiết lỗi" để xem stack trace đầy đủ.
+
+### UI kẹt "Khởi tạo..." dù DB đã có data
+
+**Nguyên nhân (đã fix)**: worker thread thiếu ScriptRunContext → callback progress
+không gọi được `st.write` → progress bar không update.
+
+**Fix**: đảm bảo dùng phiên bản code có `thread_initializer` (xem mục JSON parse retry ở trên).
+
 ## 🤖 Query errors
 
 ### "Không có thông tin nào trong ngữ cảnh đã truy xuất"
@@ -117,8 +156,10 @@ $env:PYTHONIOENCODING="utf-8"
 
 | Cause | Fix |
 |-------|-----|
+| Sai active collection trong sidebar | Sidebar → chọn collection đúng (có data về chủ đề hỏi) |
 | Tên trong câu hỏi ≠ tên trong graph (vd "Tuyen" vs "Pham Tuyen") | Bật Hybrid mode — build embeddings (tab Build → 🧬 section) |
 | Entity rỗng attributes/edges | Rebuild với context injection (đã có trong code mới) |
+| Duplicate entities chia data → mỗi variant ít info | Chạy `scripts/normalize-collection.py --collection X --apply` rồi `rebuild-embeddings.py --force` |
 | Collection không có data về chủ đề hỏi | Verify entities bằng `python scripts/debug-query.py <coll>` |
 | Streamlit cache stale | Sidebar: Clear cache + Rerun (menu hamburger ☰ → "Clear cache") |
 
@@ -133,8 +174,9 @@ $env:PYTHONIOENCODING="utf-8"
 **Fix**:
 1. Check anchors hiển thị dưới câu trả lời — có hợp lý không?
 2. Expand "🔗 Entities liên quan trong graph" để xem context
-3. Rebuild graph với chunk_size nhỏ hơn (vd 1000) → extraction precise hơn
-4. Thử model khác (gpt-4o nếu đang dùng gpt-5)
+3. Rebuild graph với chunk_size nhỏ hơn (1000-1200) → extraction precise hơn —
+   dùng `recommend_chunk_params()` trong UI
+4. Verify `OPENAI_QUERY_MODEL=gpt-5` (chất lượng cao hơn gpt-5-mini cho reasoning)
 
 ### Anchors trong câu trả lời thiếu entity quan trọng
 
@@ -263,12 +305,12 @@ streamlit run app.py
 ### Chat trả lời quá chậm (> 30s)
 
 **Possible causes**:
-- Model gpt-5 inherently slow (long reasoning steps)
+- `query_model = gpt-5` inherently slow (long reasoning steps)
 - Graph quá dày → `$graphLookup` traversal lâu
 - Context window full (80 entities × edges → nhiều token)
 
 **Fix**:
-1. Đổi sang `gpt-4o-mini` → nhanh hơn 5×
+1. Đổi `OPENAI_QUERY_MODEL=gpt-5-mini` → nhanh hơn ~5× (đánh đổi chất lượng nhẹ)
 2. Giảm `MAX_ENTITIES_IN_CONTEXT` trong `src/query_engine.py` từ 80 → 50
 3. Limit `vector_k` xuống 5
 
@@ -296,14 +338,16 @@ streamlit run app.py
 2. Rebuild với code mới (có context injection tự động)
 3. Verify: `python scripts/debug-query.py <coll>` — attributes nên có nội dung
 
-### Duplicate entities (vd "3rd Prize" và "3rd Prize – ..." là 2 nodes)
+### Duplicate entities (vd "Information Security Policy" và "Information security policy" là 2 nodes)
 
-**Nguyên nhân**: LLM extraction inconsistent naming.
+**Nguyên nhân**: LLM extraction qua N chunks độc lập, viết hoa/khoảng trắng/dấu khác nhau.
 
-**Fix**:
-1. Code mới có rule "USE canonical names consistently" trong prefix → giảm vấn đề
-2. Manual cleanup: dùng MongoDB Compass → tìm duplicates → merge bằng hand
-3. (Tương lai) entity resolution post-pass
+**Fix** (auto trong UI từ v0.5+):
+1. UI tự `find_merge_candidates` + `apply_merge_plans` ngay sau build → merge variants
+   theo canonical key (`re.sub(r"[^a-z0-9]", "", name.lower())`).
+2. Manual: `python scripts/normalize-collection.py --collection X --apply`
+3. Sau normalize → re-embed: `python scripts/rebuild-embeddings.py --collection X --force`
+   (vì attrs/rels đã đổi → embedding cũ stale).
 
 ### Pham Tuyen không link tới Veek/AIAIVN
 
@@ -328,6 +372,47 @@ streamlit run app.py
 **Fix**: code tự reconnect (pymongo handle). Nếu fail:
 1. Verify URI có `retryWrites=true&w=majority`
 2. Restart Streamlit / Python
+
+## ☁️ Deploy errors (Streamlit Cloud)
+
+### `RuntimeError: Thiếu biến môi trường bắt buộc: MONGODB_URI` trên cloud
+
+**Nguyên nhân**: secrets chưa điền hoặc `app.py` không sync `st.secrets` → `os.environ`.
+
+**Fix**:
+1. Streamlit Cloud → app → Settings → **Secrets** → paste TOML:
+   ```toml
+   MONGODB_URI = "mongodb+srv://..."
+   OPENAI_API_KEY = "sk-..."
+   OPENAI_EXTRACTION_MODEL = "gpt-5-mini"
+   OPENAI_QUERY_MODEL = "gpt-5"
+   OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+   ```
+2. Verify `app.py` có đoạn `for _key, _val in st.secrets.items(): os.environ.setdefault(...)`
+   ở đầu file.
+
+### "Main file does not exist: streamlit_app.py"
+
+**Nguyên nhân**: Streamlit Cloud mặc định tìm `streamlit_app.py`.
+
+**Fix**: deployment settings → main file → đổi sang `app.py`.
+
+### "You do not have admin permissions on GitHub"
+
+**Nguyên nhân**: tài khoản Streamlit Cloud login khác chủ repo.
+
+**Fix** (3 options):
+1. Login Streamlit bằng tài khoản GitHub là OWNER của repo
+2. Owner add bạn làm admin collaborator của repo
+3. Fork repo về tài khoản của bạn rồi deploy fork
+
+### Version v0.X.Y trong sidebar không update sau deploy
+
+**Nguyên nhân**: Streamlit Cloud cache module Python.
+
+**Fix**:
+1. App settings → **Reboot app** (force restart)
+2. Hoặc bump `src/version.py` → push commit mới → cloud auto re-deploy
 
 ## 💬 Khi không tự fix được
 

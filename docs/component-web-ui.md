@@ -1,8 +1,8 @@
 # Component: Web UI (Streamlit)
 
-> Files: `app.py` (38 lines) + `src/ui/` (5 modules, 642 lines tổng)
+> Files: `app.py` (81 lines, có sync `st.secrets`) + `src/ui/` (5 modules)
 > Vai trò: Giao diện web tương tác cho user — 3 tabs cho 3 phase
-> (Build, Chat, Visualize).
+> (Build, Chat, Visualize). Sidebar hiển thị version + 2 model.
 
 ## 🎯 Mục đích
 
@@ -17,18 +17,31 @@ cần code/CLI. Streamlit lý tưởng vì:
 ## 📂 Cấu trúc
 
 ```
-app.py                          # entry point + tab routing (38 lines)
+app.py                          # entry point + secrets sync + tab routing (81 lines)
 src/ui/
-├── shared.py                   # cached resources + helpers (49 lines)
-├── sidebar.py                  # active collection selector (50 lines)
-├── tab_build.py                # Tab 1: Build Graph (358 lines)
-├── tab_chat.py                 # Tab 2: Chat (110 lines)
-└── tab_visualize.py            # Tab 3: Visualize (75 lines)
+├── shared.py                   # cached resources + helpers
+├── sidebar.py                  # version badge + 2 models + active collection
+├── tab_build.py                # Tab 1: Build Graph + PDF analysis + auto-normalize
+├── tab_chat.py                 # Tab 2: Chat
+└── tab_visualize.py            # Tab 3: Visualize
 ```
 
 ## 🚪 `app.py` — entry point
 
 ```python
+import os
+import streamlit as st
+
+# Streamlit Cloud lưu secrets trong st.secrets (TOML), KHÔNG tự inject env vars.
+# load_config() đọc qua os.getenv() → cần đoạn này để work cả local (.env)
+# lẫn cloud (st.secrets). Local rỗng → no-op.
+try:
+    for _key, _val in st.secrets.items():
+        if isinstance(_val, str):
+            os.environ.setdefault(_key, _val)
+except (FileNotFoundError, Exception):
+    pass
+
 st.set_page_config(page_title="GraphRAG × MongoDB Demo", layout="wide")
 
 render_sidebar()
@@ -36,20 +49,26 @@ render_sidebar()
 st.title("🕸️ GraphRAG × MongoDB Demo")
 st.caption("Demo end-to-end: PDF → Knowledge Graph → Chat")
 
-# Workflow guide expander
 with st.expander("📖 Workflow cho tài liệu mới (lần đầu dùng)"):
     st.markdown("""1️⃣ Build → 2️⃣ Chat → 3️⃣ Visualize ...""")
 
-# 3 tabs theo workflow order
 tab_build, tab_chat, tab_graph = st.tabs([
-    "1️⃣ Build Graph",
-    "2️⃣ Chat",
-    "3️⃣ Visualize",
+    "1️⃣ Build Graph", "2️⃣ Chat", "3️⃣ Visualize",
 ])
 
 with tab_build:     render_build_tab()
 with tab_chat:      render_chat_tab()
 with tab_graph:     render_visualize_tab()
+```
+
+**Deployment note**: trên Streamlit Cloud, điền secrets dạng TOML:
+```toml
+MONGODB_URI = "mongodb+srv://..."
+MONGODB_DB = "graphrag_demo"
+OPENAI_API_KEY = "sk-..."
+OPENAI_EXTRACTION_MODEL = "gpt-5-mini"
+OPENAI_QUERY_MODEL = "gpt-5"
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 ```
 
 ## 🧠 `src/ui/shared.py` — cached resources
@@ -89,24 +108,29 @@ TTL 10s → user thấy collection mới sau khi build, không phải refresh ta
 
 Helpers cho session_state + name sanitization.
 
-## 📌 `src/ui/sidebar.py` — collection selector
+## 📌 `src/ui/sidebar.py` — version badge + collection selector
 
-Sidebar luôn hiển thị bên trái mọi tab. 3 chức năng:
+Sidebar luôn hiển thị bên trái mọi tab. 4 chức năng:
 
-1. **Show config** (read-only):
+1. **Version badge** — `🏷️ App version: vX.Y.Z` (đọc `src/version.py`).
+   Bump version mỗi khi fix bug → user reload thấy version mới = biết code đã update,
+   chưa update = vẫn dùng cache cũ.
+
+2. **Show config** (read-only):
    ```
-   DB:         graphrag_demo
-   Chat model: gpt-5
+   DB:               graphrag_demo
+   Extraction model: gpt-5-mini
+   Query model:      gpt-5
    ```
 
-2. **Active collection dropdown** — chọn collection để Chat & Visualize:
+3. **Active collection dropdown** — chọn collection để Chat & Visualize:
    ```python
    options = sorted(set(existing) | {cfg.mongodb_collection})
    active = st.selectbox("Collection", options=options, ...)
    st.session_state["active_collection"] = active
    ```
 
-3. **Refresh button** — clear `list_collections` cache khi cần thấy collection mới ngay:
+4. **Refresh button** — clear `list_collections` cache khi cần thấy collection mới ngay:
    ```python
    if st.button("🔄 Refresh danh sách"):
        list_collections.clear()
@@ -115,64 +139,77 @@ Sidebar luôn hiển thị bên trái mọi tab. 3 chức năng:
 
 ## 🔨 `src/ui/tab_build.py` — Build Graph tab
 
-Tab phức tạp nhất (358 lines). 3 sections chính:
+Tab phức tạp nhất. 4 sections chính:
 
-### A. Build graph từ PDF
+### A. Upload PDF + Phân tích đề xuất
 
-**3 bước UI**:
-
-1. **Bước 1: Upload PDF**
-   ```python
-   uploaded = st.file_uploader("Chọn file PDF", type=["pdf"])
-   if uploaded:
-       tmp_dir = Path(tempfile.gettempdir()) / "graphrag-uploads"
-       target = tmp_dir / uploaded.name
-       target.write_bytes(uploaded.getvalue())
-   ```
-
-2. **Bước 2: Chọn collection**
-   - Radio: "Merge vào collection có sẵn" hoặc "Tạo collection mới"
-   - Text input với button **💡 Suggest từ tên file**:
-     ```python
-     def _apply_suggestion():
-         st.session_state["new_collection_input"] = slugify_collection_name(pdf_path.stem)
-
-     col_btn.button("💡 Suggest từ tên file",
-                    on_click=_apply_suggestion,
-                    disabled=pdf_path is None)
-     ```
-
-3. **Bước 3: Tham số** (chunk size, overlap, limit chunks, parallel workers)
-
-**Build action**:
 ```python
-button_slot = st.empty()
-clicked = button_slot.button("🚀 Build graph", disabled=pdf_path is None)
+uploaded = st.file_uploader("Chọn file PDF", type=["pdf"])
+if uploaded:
+    target.write_bytes(uploaded.getvalue())
 
-if clicked:
-    # Disable button ngay
-    button_slot.button("⏳ Đang build...", disabled=True, key="build_btn_disabled")
-
-    # Load + analyze
-    chunks, doc_ctx = load_pdf_chunks_with_context(pdf_path, run_cfg, ...)
-
-    # Show detected context
-    st.success(f"📑 Subjects: {doc_ctx.subjects}, Type: {doc_ctx.doc_type}, ...")
-
-    # Build with progress
-    progress_bar = st.progress(0, text="Khởi tạo...")
-    def on_progress(done, total):
-        progress_bar.progress(done/total, text=f"Chunk {done}/{total} ...")
-
-    build_graph(run_cfg, chunks, progress_callback=on_progress, max_workers=max_workers, ...)
-
-    # Persist result + rerun → button enable lại
-    st.session_state["last_build_result"] = {...}
-    st.cache_resource.clear()
-    st.rerun()
+    # Phân tích nhanh (cache theo path + mtime)
+    stats = _pdf_stats_cached(str(target), target.stat().st_mtime)
+    rec = recommend_chunk_params(stats["total_chars"])
+    # Show: 124 pages, ~380k chars → đề xuất 1000/150 (est 380 chunks)
+    if st.button("✅ Áp dụng đề xuất"):
+        st.session_state["chunk_size_input"] = rec["chunk_size"]
+        st.session_state["overlap_input"] = rec["overlap"]
 ```
 
-### B. Build embeddings section (Hybrid mode)
+### B. Chọn collection + tham số
+
+- Radio: "Merge vào collection có sẵn" hoặc "Tạo collection mới"
+- Button **💡 Suggest từ tên file** → pre-fill input qua `on_click` callback
+- Tham số: chunk_size, overlap (pre-fill từ đề xuất), limit chunks, max_workers
+
+### C. Build action
+
+```python
+# Worker thread cần attach Streamlit ScriptRunContext để gọi st.session_state
+ctx = get_script_run_ctx()
+def _init_worker():
+    add_script_run_ctx(threading.current_thread(), ctx)
+
+# Cancel event — user bấm Stop → các chunk chưa chạy bị skip
+cancel_event = threading.Event()
+
+# Error storage — live update + survive st.rerun
+errors_state = {"failed": 0, "details": []}
+def on_error(idx, err):
+    errors_state["details"].append((idx, err))
+    error_box.write(...)  # render ngay
+
+build_graph(
+    run_cfg, chunks,
+    progress_callback=on_progress,
+    failed_callback=on_failed,
+    error_callback=on_error,
+    thread_initializer=_init_worker,
+    cancel_event=cancel_event,
+    max_workers=max_workers,
+)
+
+# Auto-normalize NGAY sau build — không phải nút riêng
+plans = find_merge_candidates(run_cfg, collection)
+if plans:
+    apply_merge_plans(run_cfg, collection, plans)
+    st.info(f"🔀 Merged {len(plans)} duplicate groups")
+
+# Persist kết quả (để survive st.rerun) — không nuke bằng st.error()
+st.session_state["last_build_result"] = {
+    "ok": True, "n_entities": n, "failed": errors_state["failed"], ...
+}
+st.session_state["last_build_traceback"] = tb  # nếu fail
+st.cache_resource.clear()
+st.rerun()
+```
+
+**Build result message** render BELOW button (không nuke bởi rerun):
+- ✅ Success → `Build xong! N entities, M chunks failed`
+- ❌ Fail → expander chứa traceback đầy đủ
+
+### D. Build embeddings section (Hybrid mode)
 
 ```python
 st.subheader("🧬 Hybrid Vector + Graph (tuỳ chọn)")
@@ -187,13 +224,8 @@ if st.button("🧬 Build embeddings + vector index"):
                                  force=force)
 ```
 
-### C. Error surface
-
-Sau khi build, nếu có chunks fail (retry exhausted) → hiển thị warning:
-```python
-if failed > 0:
-    st.warning(f"⚠️ Build xong với {failed}/{total} chunks thất bại...")
-```
+> Section "Normalize duplicates" trong UI đã bị bỏ — auto-normalize trong build flow
+> đã đủ. Manual normalize giờ chỉ chạy qua `scripts/normalize-collection.py`.
 
 ## 💬 `src/ui/tab_chat.py` — Chat tab
 
