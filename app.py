@@ -47,19 +47,37 @@ with st.expander("📖 Workflow for a new document (first-time use)", expanded=F
         For a new PDF document, follow this order:
 
         **1️⃣ Build Graph** — Upload PDF and build the knowledge graph
-        - This step calls the LLM to extract entities + relationships → stored in MongoDB
+        - Upload PDF → app auto-analyzes pages/chars + recommends chunk params
+        - Pick or create a `collection` (one knowledge base per topic/document set)
         - Recommended: set `Chunk limit = 20` for a cheap test first, then build full
+        - LLM extracts entities + relationships per chunk → stored in MongoDB
+        - **Auto-normalize** runs after build: merges duplicate entities (e.g.
+          `Information Security Policy` ≡ `information security policy`)
         - Takes a few minutes to tens of minutes depending on PDF length
+        - **Then click** `🧬 Build embeddings + vector index` to enable Hybrid
+          mode (recommended — much better Q&A quality)
 
-        **2️⃣ Chat** — Ask questions against the freshly built knowledge graph
+        **2️⃣ Chat** — Ask questions against the knowledge graph
         - Pick `Active collection` in the sidebar to switch between knowledge bases
-        - The LLM traverses the graph (via `$graphLookup`) to answer
+        - The LLM extracts question entities + (if Hybrid) runs vector search,
+          then traverses the graph (`$graphLookup`) to gather context, then answers
+        - Mode badge under each answer: `🧬 Hybrid` (best) or `🕸️ Graph-only` (basic)
+        - Sample questions for the SOC 2 demo collection:
+          - *Who is the audit firm for this SOC 2 report?*
+          - *List all subservice organizations of OpenAI*
+          - *What does Snowflake provide for OpenAI?*
+          - *How many Control Objectives are in the report?*
 
-        **3️⃣ Visualize** (optional) — Interactive view of the knowledge graph
-        - Render an HTML graph: drag, zoom, inspect entities + relationships
+        **3️⃣ Visualize** (optional) — Interactive HTML view of the knowledge graph
+        - Render: drag, zoom, hover for tooltips
+        - Entities are sized in 5 tiers by centrality (super-hub → leaf)
+        - Recommended max nodes ≤ 150 for smooth browser performance
 
-        > 💡 **If you only want to query** an existing collection in MongoDB
-        > → skip step 1 and go straight to the Chat tab.
+        > 💡 **Already have data in MongoDB?** Skip step 1, pick the collection
+        > in the sidebar, and go straight to the Chat tab.
+
+        > 🔗 **Deep links**: append `?tab=chat` or `?tab=visualize` to the URL
+        > to land directly on a specific tab — useful for sharing demo links.
         """
     )
 
