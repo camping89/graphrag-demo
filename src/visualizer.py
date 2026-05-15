@@ -203,6 +203,22 @@ def render_html(graph: nx.DiGraph, output_path: Path) -> Path:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     net.write_html(str(output_path), open_browser=False, notebook=False)
+
+    # Post-process: inject JS to freeze physics permanently after stabilization.
+    # vis-network không tự tắt physics → sau stabilize, nodes vẫn jitter nhẹ
+    # khi user drag. Listen `stabilizationIterationsDone` rồi set physics:false
+    # để nodes "đông cứng" hẳn (user vẫn drag được, nhưng KHÔNG còn animation).
+    freeze_js = (
+        "network.on('stabilizationIterationsDone', function () {"
+        "  network.setOptions({ physics: false });"
+        "});"
+    )
+    html = output_path.read_text(encoding="utf-8")
+    # Pyvis HTML kết thúc network init bằng `return network;`. Inject TRƯỚC line này.
+    if "return network;" in html:
+        html = html.replace("return network;", freeze_js + "\n  return network;")
+        output_path.write_text(html, encoding="utf-8")
+
     return output_path
 
 
