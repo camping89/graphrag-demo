@@ -83,8 +83,9 @@ def fetch_entities(cfg: Config, limit: int = DEFAULT_MAX_NODES) -> list[Dict[str
 def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
     """Convert danh sách entity dict thành networkx DiGraph.
 
-    Chỉ giữ edges trỏ tới node ĐÃ được fetch — tránh networkx tự tạo "skeleton
-    nodes" cho target ngoài limit, làm graph phồng lên 5-10× số node fetched.
+    - Chỉ giữ edges trỏ tới node ĐÃ được fetch (no skeleton nodes)
+    - Set `value` = degree để vis-network scale node size: hub to, leaf nhỏ
+      → tạo visual hierarchy, mắt user định vị được "trung tâm" của graph
     """
     entities = list(entities)
     graph = nx.DiGraph()
@@ -106,14 +107,24 @@ def build_networkx_graph(entities: Iterable[Dict[str, Any]]) -> nx.DiGraph:
             if target and target != source and target in fetched_ids:
                 graph.add_edge(source, target)
 
+    # Set value = total degree → vis-network dùng để scale node size
+    for node_id in graph.nodes:
+        deg = graph.in_degree(node_id) + graph.out_degree(node_id)
+        graph.nodes[node_id]["value"] = max(deg, 1)  # min 1 để vẫn thấy node leaf
+
     return graph
 
 
 def render_html(graph: nx.DiGraph, output_path: Path) -> Path:
     """Render networkx graph thành HTML file bằng pyvis.
 
-    Cấu hình physics: stabilize sau 200 iterations rồi DỪNG hẳn — tránh
-    browser chạy simulation vô tận với graph nhiều edge → CPU 100% mãi.
+    Layout strategy:
+      - forceAtlas2Based solver: tốt hơn barnesHut cho dense graph
+        (spread nodes đều hơn, ít hairball)
+      - avoidOverlap=1: cấm nodes chồng lên nhau
+      - Node size scale theo `value` (= degree) → hub to, leaf nhỏ
+      - Labels chỉ hiện khi node đủ to (drawThreshold) → ít overlap text
+      - Stabilize 250 iter rồi dừng physics (graph "đông cứng")
     """
     net = Network(
         height="800px",
@@ -124,23 +135,41 @@ def render_html(graph: nx.DiGraph, output_path: Path) -> Path:
         notebook=False,
     )
     net.from_nx(graph)
-    # Limit simulation: stabilize 200 iter rồi tắt physics → graph "đông cứng",
-    # user vẫn drag/zoom được, nhưng CPU không cháy.
     net.set_options("""{
       "physics": {
         "enabled": true,
-        "stabilization": {"enabled": true, "iterations": 200, "fit": true},
-        "barnesHut": {
-          "gravitationalConstant": -8000,
-          "centralGravity": 0.3,
-          "springLength": 120,
-          "springConstant": 0.04,
-          "damping": 0.5
+        "solver": "forceAtlas2Based",
+        "stabilization": {"enabled": true, "iterations": 250, "fit": true},
+        "forceAtlas2Based": {
+          "gravitationalConstant": -100,
+          "centralGravity": 0.005,
+          "springLength": 200,
+          "springConstant": 0.18,
+          "damping": 0.4,
+          "avoidOverlap": 1
         },
         "minVelocity": 0.75
       },
-      "interaction": {"hover": true, "tooltipDelay": 200},
-      "edges": {"smooth": {"enabled": false}}
+      "nodes": {
+        "scaling": {
+          "min": 10,
+          "max": 40,
+          "label": {
+            "enabled": true,
+            "min": 10,
+            "max": 22,
+            "drawThreshold": 12,
+            "maxVisible": 40
+          }
+        },
+        "font": {"size": 12, "strokeWidth": 3, "strokeColor": "#000"}
+      },
+      "edges": {
+        "smooth": {"enabled": false},
+        "color": {"opacity": 0.35},
+        "width": 0.5
+      },
+      "interaction": {"hover": true, "tooltipDelay": 200, "navigationButtons": true}
     }""")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
